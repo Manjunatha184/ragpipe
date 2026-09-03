@@ -13,6 +13,12 @@ from psycopg_pool import ConnectionPool
 from ragpipe.models import Chunk, DocumentState, StoreStatus, SyncResult
 from ragpipe.store.base import Store
 
+EXPECTED_SCHEMA_REVISION = "0001_initial_schema"
+
+
+class SchemaNotReadyError(RuntimeError):
+    """Raised when required database migrations have not been applied."""
+
 
 class PgVectorStore(Store):
     def __init__(self, database_url: str) -> None:
@@ -20,35 +26,72 @@ class PgVectorStore(Store):
         self._conn: Connection[Any] | None = None
 
     def initialize(self, dimension: int) -> None:
+        """Verify that Alembic created a compatible database schema."""
+
         with self._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS documents (
-                  id uuid PRIMARY KEY, path text UNIQUE NOT NULL, content_hash char(64) NOT NULL,
-                  media_type text NOT NULL, size_bytes bigint NOT NULL CHECK (size_bytes >= 0),
-                  last_synced_at timestamptz NOT NULL DEFAULT now()
-                );
-                CREATE TABLE IF NOT EXISTS sync_runs (
-                  id uuid PRIMARY KEY, source text NOT NULL, status text NOT NULL,
-                  new_documents int NOT NULL, changed_documents int NOT NULL,
-                  deleted_documents int NOT NULL, unchanged_documents int NOT NULL,
-                  embedded_chunks int NOT NULL, deleted_chunks int NOT NULL,
-                  started_at timestamptz NOT NULL, finished_at timestamptz NOT NULL,
-                  error text
-                );
-            """)
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS chunks (
-                  id uuid PRIMARY KEY,
-                  document_id uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-                  chunk_index int NOT NULL, content text NOT NULL, content_hash char(64) NOT NULL,
-                  metadata jsonb NOT NULL DEFAULT '{{}}', embedding_model text NOT NULL,
-                  embedding vector({dimension}) NOT NULL,
-                  UNIQUE(document_id, chunk_index)
+            cur.execute(
+                """
+                SELECT
+                    to_regclass('public.alembic_version'),
+                    to_regclass('public.documents'),
+                    to_regclass('public.chunks'),
+                    to_regclass('public.sync_runs')
+                """
+            )
+            tables = cur.fetchone()
+
+            if tables is None or any(table is None for table in tables):
+                raise SchemaNotReadyError(
+                    "Database schema is not initialized. "
+                    "Run `alembic upgrade head` before starting ragpipe."
                 )
-            """)
-            cur.execute("CREATE INDEX IF NOT EXISTS chunks_document_id_idx ON chunks(document_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS documents_hash_idx ON documents(content_hash)")
+
+            cur.execute("SELECT version_num FROM alembic_version LIMIT 1")
+            revision_row = cur.fetchone()
+
+            if revision_row is None:
+                raise SchemaNotReadyError(
+                    "Database schema has no Alembic revision. Run `alembic upgrade head`."
+                )
+
+            actual_revision = str(revision_row[0])
+
+            if actual_revision != EXPECTED_SCHEMA_REVISION:
+                raise SchemaNotReadyError(
+                    f"Database schema revision {actual_revision!r} does not match "
+                    f"required revision {EXPECTED_SCHEMA_REVISION!r}. "
+                    "Run `alembic upgrade head`."
+                )
+
+            cur.execute(
+                """
+                SELECT format_type(
+                    attribute.atttypid,
+                    attribute.atttypmod
+                )
+                FROM pg_attribute AS attribute
+                JOIN pg_class AS relation
+                  ON relation.oid = attribute.attrelid
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = relation.relnamespace
+                WHERE namespace.nspname = 'public'
+                  AND relation.relname = 'chunks'
+                  AND attribute.attname = 'embedding'
+                  AND attribute.attnum > 0
+                  AND NOT attribute.attisdropped
+                """
+            )
+            vector_row = cur.fetchone()
+
+            expected_vector_type = f"vector({dimension})"
+
+            if vector_row is None or str(vector_row[0]) != expected_vector_type:
+                actual_vector_type = None if vector_row is None else str(vector_row[0])
+                raise SchemaNotReadyError(
+                    f"Database embedding type is {actual_vector_type!r}; "
+                    f"expected {expected_vector_type!r}."
+                )
+
             register_vector(conn)
 
     def _active(self) -> Connection[Any]:

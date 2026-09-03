@@ -16,6 +16,7 @@ dependencies = [
   "pydantic-settings>=2.5,<3",
   "typer>=0.12,<1",
   "structlog>=24.4,<26",
+  "alembic>=1.14,<2",
   "pypdf>=5,<7",
 ]
 
