@@ -7,7 +7,7 @@ name = "ragpipe"
 version = "0.1.0"
 description = "Incremental, idempotent document-to-pgvector synchronization pipeline"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [{name = "Manjunatha"}]
 dependencies = [
@@ -54,13 +54,13 @@ omit = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
 

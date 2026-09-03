@@ -43,7 +43,7 @@ replacement is inserted. Any loader, embedding, or database failure rolls the tr
 
 ## Quick start
 
-Requirements: Docker with Compose, Python 3.11+, and enough disk/RAM to download and run the local
+Requirements: Docker with Compose, Python 3.12+, and enough disk/RAM to download and run the local
 embedding model once.
 
 ```bash

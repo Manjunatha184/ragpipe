@@ -29,12 +29,10 @@ def sync(
 ) -> None:
     settings = Settings(source=source)
     configure_logging(settings.log_level)
-    embedder = LocalSentenceTransformerProvider(settings.embedding_model)
-    if embedder.dimension != settings.embedding_dimension:
-        raise typer.BadParameter(
-            f"Model dimension {embedder.dimension} does not match configured "
-            f"dimension {settings.embedding_dimension}"
-        )
+    embedder = LocalSentenceTransformerProvider(
+        model_name=settings.embedding_model,
+        expected_dimension=settings.embedding_dimension,
+    )
     store = make_store(settings)
     try:
         result = SyncPipeline(
