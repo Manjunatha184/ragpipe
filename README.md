@@ -109,6 +109,15 @@ Check the latest revision available in the code:
 ```bash
 alembic heads
 ```
+## CLI exit codes
+
+| Code | Meaning |
+|---:|---|
+| `0` | Command completed successfully |
+| `1` | Synchronization failed; the failed run was recorded |
+| `2` | Database schema is missing or incompatible |
+
+Failed document and vector changes are rolled back atomically. A separate failed-run record is stored with a bounded, credential-sanitized error message.
 
 The application validates the migration revision and vector dimension during startup. It refuses to run when the schema is missing, outdated, or incompatible.
 

@@ -10,7 +10,7 @@ from alembic.config import Config
 
 from alembic import command
 from ragpipe.chunking.chunker import RecursiveCharacterChunker
-from ragpipe.pipeline import SyncPipeline
+from ragpipe.pipeline import SyncFailedError, SyncPipeline
 from ragpipe.store.pgvector_store import PgVectorStore
 from tests.fakes import FakeEmbedder
 
@@ -196,7 +196,10 @@ def test_failed_changed_document_sync_rolls_back(
         embedder=FailingEmbedder(),
     )
 
-    with pytest.raises(RuntimeError, match="Simulated embedding failure"):
+    with pytest.raises(
+        SyncFailedError,
+        match="Simulated embedding failure",
+    ):
         failing_pipeline.sync(tmp_path)
 
     # The original document and vector must still exist after rollback.
@@ -204,6 +207,8 @@ def test_failed_changed_document_sync_rolls_back(
 
     assert rolled_back_status.documents == original_status.documents
     assert rolled_back_status.chunks == original_status.chunks
+
+    assert rolled_back_status.last_sync_status == "failed"
 
     with pgvector_store.transaction():
         rolled_back_state = pgvector_store.document_states()["policy.txt"]

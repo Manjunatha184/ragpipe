@@ -1,7 +1,14 @@
+from collections.abc import Sequence
 from pathlib import Path
 
+import pytest
+
 from ragpipe.chunking.chunker import RecursiveCharacterChunker
-from ragpipe.pipeline import SyncPipeline
+from ragpipe.pipeline import (
+    SyncFailedError,
+    SyncPipeline,
+    sanitize_error,
+)
 from tests.fakes import FakeEmbedder, MemoryStore
 
 
@@ -55,3 +62,65 @@ def test_empty_document_is_tracked_without_embedding(tmp_path: Path) -> None:
     result = pipeline.sync(tmp_path)
     assert result.new_documents == 1 and result.embedded_chunks == 0
     assert embedder.calls == 0 and store.status().documents == 1
+
+
+class FailingEmbedder(FakeEmbedder):
+    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        raise RuntimeError("Embedding service unavailable")
+
+
+def test_failed_sync_is_recorded_after_rollback(
+    tmp_path: Path,
+) -> None:
+    document = tmp_path / "policy.txt"
+    document.write_text(
+        "Original policy",
+        encoding="utf-8",
+    )
+
+    pipeline, store, _ = make_pipeline()
+    pipeline.sync(tmp_path)
+
+    original_state = store.documents["policy.txt"]
+    original_chunk_count = store.status().chunks
+
+    document.write_text(
+        "Updated policy",
+        encoding="utf-8",
+    )
+
+    failing_pipeline = SyncPipeline(
+        store=store,
+        chunker=RecursiveCharacterChunker(40, 5),
+        embedder=FailingEmbedder(),
+    )
+
+    with pytest.raises(
+        SyncFailedError,
+        match="Embedding service unavailable",
+    ) as captured:
+        failing_pipeline.sync(tmp_path)
+
+    assert captured.value.run_id == store.runs[-1].run_id
+    assert store.runs[-1].status == "failed"
+    assert store.status().last_sync_status == "failed"
+
+    # The original document remains because the changed-document
+    # transaction was rolled back.
+    assert store.documents["policy.txt"] == original_state
+    assert store.status().chunks == original_chunk_count
+
+
+def test_error_sanitization_removes_credentials() -> None:
+    error = RuntimeError(
+        "Could not connect to "
+        "postgresql://ragpipe:super-secret@localhost/ragpipe "
+        "password=another-secret"
+    )
+
+    sanitized = sanitize_error(error)
+
+    assert "super-secret" not in sanitized
+    assert "another-secret" not in sanitized
+    assert "postgresql://ragpipe:***@localhost/ragpipe" in sanitized
+    assert "password=***" in sanitized
