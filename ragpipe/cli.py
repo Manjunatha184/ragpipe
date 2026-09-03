@@ -14,6 +14,7 @@ from ragpipe.embedding.local_provider import (
 )
 from ragpipe.logging import configure_logging
 from ragpipe.pipeline import (
+    SyncAlreadyRunningError,
     SyncFailedError,
     SyncPipeline,
 )
@@ -97,6 +98,19 @@ def sync(
                 indent=2,
             )
         )
+
+    except SyncAlreadyRunningError as error:
+        typer.echo(
+            json.dumps(
+                {
+                    "status": "busy",
+                    "error": error.safe_message,
+                },
+                indent=2,
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=3) from None
 
     except SyncFailedError as error:
         typer.echo(
