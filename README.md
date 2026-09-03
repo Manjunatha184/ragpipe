@@ -116,6 +116,13 @@ alembic heads
 | `0` | Command completed successfully |
 | `1` | Synchronization failed; the failed run was recorded |
 | `2` | Database schema is missing or incompatible |
+| `3` | Another synchronization already owns the database sync lock |
+
+## Concurrent synchronization
+
+Ragpipe uses a PostgreSQL advisory lock to allow only one synchronization per database at a time. This prevents overlapping cron jobs or deployments from reading the same corpus state and applying conflicting changes.
+
+A rejected concurrent attempt exits with code `3`. It does not scan documents, generate embeddings, modify the corpus, or create a failed-run record. The lock is automatically released when synchronization finishes or the database session closes.
 
 Failed document and vector changes are rolled back atomically. A separate failed-run record is stored with a bounded, credential-sanitized error message.
 

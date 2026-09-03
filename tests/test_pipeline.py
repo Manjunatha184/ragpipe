@@ -5,6 +5,7 @@ import pytest
 
 from ragpipe.chunking.chunker import RecursiveCharacterChunker
 from ragpipe.pipeline import (
+    SyncAlreadyRunningError,
     SyncFailedError,
     SyncPipeline,
     sanitize_error,
@@ -124,3 +125,26 @@ def test_error_sanitization_removes_credentials() -> None:
     assert "another-secret" not in sanitized
     assert "postgresql://ragpipe:***@localhost/ragpipe" in sanitized
     assert "password=***" in sanitized
+
+
+def test_lock_contention_does_not_start_or_record_sync(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "document.txt").write_text(
+        "Document content",
+        encoding="utf-8",
+    )
+
+    pipeline, store, embedder = make_pipeline()
+    store.sync_lock_available = False
+
+    with pytest.raises(
+        SyncAlreadyRunningError,
+        match="already running",
+    ):
+        pipeline.sync(tmp_path)
+
+    assert store.documents == {}
+    assert store.runs == []
+    assert store.write_count == 0
+    assert embedder.calls == 0

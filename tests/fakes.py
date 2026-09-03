@@ -7,7 +7,7 @@ from contextlib import contextmanager
 
 from ragpipe.embedding.base import EmbeddingProvider
 from ragpipe.models import Chunk, DocumentState, StoreStatus, SyncResult
-from ragpipe.store.base import Store
+from ragpipe.store.base import Store, SyncLockUnavailableError
 
 
 class FakeEmbedder(EmbeddingProvider):
@@ -34,9 +34,17 @@ class MemoryStore(Store):
         self.chunk_counts: dict[str, int] = {}
         self.runs: list[SyncResult] = []
         self.write_count = 0
+        self.sync_lock_available = True
 
     def initialize(self, dimension: int) -> None:
         pass
+
+    @contextmanager
+    def sync_lock(self) -> Iterator[None]:
+        if not self.sync_lock_available:
+            raise SyncLockUnavailableError("Another synchronization is already running.")
+
+        yield
 
     @contextmanager
     def transaction(self) -> Iterator[Store]:

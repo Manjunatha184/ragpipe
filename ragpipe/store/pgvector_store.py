@@ -11,9 +11,10 @@ from psycopg import Connection
 from psycopg_pool import ConnectionPool
 
 from ragpipe.models import Chunk, DocumentState, StoreStatus, SyncResult
-from ragpipe.store.base import Store
+from ragpipe.store.base import Store, SyncLockUnavailableError
 
 EXPECTED_SCHEMA_REVISION = "0001_initial_schema"
+SYNC_LOCK_NAME = "ragpipe:global-sync"
 
 
 class SchemaNotReadyError(RuntimeError):
@@ -93,6 +94,49 @@ class PgVectorStore(Store):
                 )
 
             register_vector(conn)
+
+    @contextmanager
+    def sync_lock(self) -> Iterator[None]:
+        """Allow only one synchronization per database at a time."""
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT pg_try_advisory_lock(
+                        hashtextextended(%s, 0)
+                    )
+                    """,
+                    (SYNC_LOCK_NAME,),
+                )
+                row = cur.fetchone()
+
+            conn.commit()
+            acquired = row is not None and bool(row[0])
+
+            if not acquired:
+                raise SyncLockUnavailableError("Another synchronization is already running.")
+
+            try:
+                yield
+            finally:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT pg_advisory_unlock(
+                                hashtextextended(%s, 0)
+                            )
+                            """,
+                            (SYNC_LOCK_NAME,),
+                        )
+
+                    conn.commit()
+                except Exception:
+                    # Closing the session guarantees PostgreSQL releases
+                    # any remaining session-level advisory lock.
+                    conn.close()
+                    raise
 
     def _active(self) -> Connection[Any]:
         if self._conn is None:

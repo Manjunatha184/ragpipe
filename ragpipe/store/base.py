@@ -7,9 +7,15 @@ from contextlib import AbstractContextManager
 from ragpipe.models import Chunk, DocumentState, StoreStatus, SyncResult
 
 
+class SyncLockUnavailableError(RuntimeError):
+    """Raised when another synchronization already owns the store lock."""
+
+
 class Store(ABC):
     @abstractmethod
     def initialize(self, dimension: int) -> None: ...
+    @abstractmethod
+    def sync_lock(self) -> AbstractContextManager[None]: ...
     @abstractmethod
     def transaction(self) -> AbstractContextManager[Store]: ...
     @abstractmethod

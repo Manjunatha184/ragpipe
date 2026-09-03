@@ -11,6 +11,7 @@ from alembic.config import Config
 from alembic import command
 from ragpipe.chunking.chunker import RecursiveCharacterChunker
 from ragpipe.pipeline import SyncFailedError, SyncPipeline
+from ragpipe.store.base import SyncLockUnavailableError
 from ragpipe.store.pgvector_store import PgVectorStore
 from tests.fakes import FakeEmbedder
 
@@ -214,3 +215,29 @@ def test_failed_changed_document_sync_rolls_back(
         rolled_back_state = pgvector_store.document_states()["policy.txt"]
 
     assert rolled_back_state.content_hash == original_state.content_hash
+
+
+def test_sync_lock_rejects_concurrent_holder(
+    pgvector_store: PgVectorStore,
+) -> None:
+    if TEST_DATABASE_URL is None:
+        pytest.skip("RAGPIPE_TEST_DATABASE_URL is not configured")
+
+    contender = PgVectorStore(TEST_DATABASE_URL)
+
+    try:
+        with (
+            pgvector_store.sync_lock(),
+            pytest.raises(
+                SyncLockUnavailableError,
+                match="already running",
+            ),
+            contender.sync_lock(),
+        ):
+            pytest.fail("Contender unexpectedly acquired the sync lock")
+
+        # The lock must become reusable after the first holder releases it.
+        with contender.sync_lock():
+            pass
+    finally:
+        contender.close()
