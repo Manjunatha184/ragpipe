@@ -6,7 +6,9 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from alembic.config import Config
 
+from alembic import command
 from ragpipe.chunking.chunker import RecursiveCharacterChunker
 from ragpipe.pipeline import SyncPipeline
 from ragpipe.store.pgvector_store import PgVectorStore
@@ -15,6 +17,18 @@ from tests.fakes import FakeEmbedder
 TEST_DATABASE_URL = os.getenv("RAGPIPE_TEST_DATABASE_URL")
 
 pytestmark = pytest.mark.integration
+
+
+class PgVectorFakeEmbedder(FakeEmbedder):
+    @property
+    def dimension(self) -> int:
+        return 384
+
+    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        self.calls += 1
+        self.texts += len(texts)
+
+        return [[float(len(text)), *([0.0] * 383)] for text in texts]
 
 
 def reset_test_database(database_url: str) -> None:
@@ -37,30 +51,42 @@ def reset_test_database(database_url: str) -> None:
             DROP TABLE IF EXISTS chunks CASCADE;
             DROP TABLE IF EXISTS documents CASCADE;
             DROP TABLE IF EXISTS sync_runs CASCADE;
+            DROP TABLE IF EXISTS alembic_version CASCADE;
             """
         )
 
 
 @pytest.fixture
-def pgvector_store() -> Generator[PgVectorStore, None, None]:
+def pgvector_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[PgVectorStore, None, None]:
     if TEST_DATABASE_URL is None:
         pytest.skip("RAGPIPE_TEST_DATABASE_URL is not configured")
 
+    monkeypatch.setenv(
+        "RAGPIPE_DATABASE_URL",
+        TEST_DATABASE_URL,
+    )
+
     reset_test_database(TEST_DATABASE_URL)
 
+    alembic_config = Config("alembic.ini")
+    command.upgrade(alembic_config, "head")
+
     store = PgVectorStore(TEST_DATABASE_URL)
-    store.initialize(dimension=3)
+    store.initialize(dimension=384)
 
     try:
         yield store
     finally:
         store.close()
+        command.downgrade(alembic_config, "base")
         reset_test_database(TEST_DATABASE_URL)
 
 
 def create_pipeline(
     store: PgVectorStore,
-    embedder: FakeEmbedder | None = None,
+    embedder: PgVectorFakeEmbedder | None = None,
 ) -> SyncPipeline:
     return SyncPipeline(
         store=store,
@@ -68,7 +94,7 @@ def create_pipeline(
             chunk_size=100,
             overlap=10,
         ),
-        embedder=embedder or FakeEmbedder(),
+        embedder=embedder or PgVectorFakeEmbedder(),
         batch_size=16,
     )
 
@@ -143,7 +169,7 @@ def test_complete_document_lifecycle(
     assert deleted_status.chunks == 0
 
 
-class FailingEmbedder(FakeEmbedder):
+class FailingEmbedder(PgVectorFakeEmbedder):
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
         raise RuntimeError("Simulated embedding failure")
 

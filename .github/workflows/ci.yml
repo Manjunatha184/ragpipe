@@ -13,6 +13,7 @@ jobs:
 
     env:
       RAGPIPE_TEST_DATABASE_URL: postgresql://ragpipe@localhost:5432/ragpipe_test
+      RAGPIPE_DATABASE_URL: postgresql://ragpipe@localhost:5432/ragpipe_test
 
     services:
       postgres:

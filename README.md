@@ -52,6 +52,7 @@ docker compose up -d
 python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[local,dev]'
+alembic upgrade head
 ragpipe sync --source ./sample_docs
 ragpipe sync --source ./sample_docs  # embedded_chunks must be 0
 ragpipe status
@@ -86,6 +87,30 @@ make install
 make check
 make build
 ```
+
+## Database migrations
+
+ragpipe uses Alembic as the only owner of the PostgreSQL schema.
+
+Apply pending migrations before running the application:
+
+```bash
+alembic upgrade head
+```
+
+Check the installed revision:
+
+```bash
+alembic current
+```
+
+Check the latest revision available in the code:
+
+```bash
+alembic heads
+```
+
+The application validates the migration revision and vector dimension during startup. It refuses to run when the schema is missing, outdated, or incompatible.
 
 The most important test runs the full pipeline twice and verifies the second run performs no
 embedding and no document/chunk writes. A separate test proves source deletion removes every chunk.
