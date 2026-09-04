@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, Never, cast
 
 import typer
 
@@ -60,6 +60,38 @@ def print_schema_error(error: SchemaNotReadyError) -> None:
         ),
         err=True,
     )
+
+
+def reject_non_finite_json(value: str) -> Never:
+    """Reject JSON extensions such as NaN and Infinity."""
+
+    raise ValueError(f"Non-finite JSON number is not allowed: {value}")
+
+
+def parse_metadata_filter(value: str | None) -> dict[str, Any] | None:
+    """Parse a CLI metadata filter as a strict JSON object."""
+
+    if value is None:
+        return None
+
+    try:
+        parsed = json.loads(
+            value,
+            parse_constant=reject_non_finite_json,
+        )
+    except (json.JSONDecodeError, ValueError) as error:
+        raise typer.BadParameter(
+            "Metadata filter must be valid JSON.",
+            param_hint="--metadata",
+        ) from error
+
+    if not isinstance(parsed, dict):
+        raise typer.BadParameter(
+            "Metadata filter must be a JSON object.",
+            param_hint="--metadata",
+        )
+
+    return cast(dict[str, Any], parsed)
 
 
 @app.command()
@@ -161,6 +193,14 @@ def search(
             help="Maximum number of matching chunks.",
         ),
     ] = 5,
+    metadata: Annotated[
+        str | None,
+        typer.Option(
+            "--metadata",
+            "-m",
+            help='JSON document-metadata filter, for example: {"department":"hr"}',
+        ),
+    ] = None,
 ) -> None:
     query_text = query.strip()
 
@@ -170,6 +210,7 @@ def search(
             param_hint="--query",
         )
 
+    metadata_filter = parse_metadata_filter(metadata)
     settings = Settings()
     configure_logging(settings.log_level)
 
@@ -192,12 +233,14 @@ def search(
             query_embedding=query_embeddings[0],
             model_name=embedder.model_name,
             limit=limit,
+            metadata_filter=metadata_filter,
         )
 
         typer.echo(
             json.dumps(
                 {
                     "query": query_text,
+                    "metadata_filter": metadata_filter,
                     "embedding_model": embedder.model_name,
                     "count": len(results),
                     "results": [asdict(result) for result in results],

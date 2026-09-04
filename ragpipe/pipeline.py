@@ -75,6 +75,7 @@ class SyncPipeline:
 
         new_documents = 0
         changed_documents = 0
+        metadata_changed_documents = 0
         deleted_documents = 0
         unchanged_documents = 0
         embedded_chunks = 0
@@ -91,8 +92,20 @@ class SyncPipeline:
 
                         new_documents = len(diff.new)
                         changed_documents = len(diff.changed)
+                        metadata_changed_documents = len(diff.metadata_changed)
                         deleted_documents = len(diff.deleted)
                         unchanged_documents = len(diff.unchanged)
+
+                        # Metadata-only changes update the document row without
+                        # deleting chunks or generating embeddings again.
+                        for item in diff.metadata_changed:
+                            metadata_state = previous[item.path]
+
+                            self.store.update_document_metadata(
+                                document_id=metadata_state.id,
+                                document_metadata=item.metadata,
+                                metadata_hash=item.metadata_hash,
+                            )
 
                         for deleted in diff.deleted:
                             deleted_chunks += self.store.delete_document(deleted.id)
@@ -117,13 +130,15 @@ class SyncPipeline:
                                 )
 
                             self.store.replace_document(
-                                item.path,
-                                item.content_hash,
-                                item.media_type,
-                                item.size_bytes,
-                                chunks,
-                                embeddings,
-                                self.embedder.model_name,
+                                path=item.path,
+                                content_hash=item.content_hash,
+                                media_type=item.media_type,
+                                size_bytes=item.size_bytes,
+                                chunks=chunks,
+                                embeddings=embeddings,
+                                model_name=self.embedder.model_name,
+                                document_metadata=item.metadata,
+                                metadata_hash=item.metadata_hash,
                             )
                             embedded_chunks += len(chunks)
 
@@ -134,6 +149,7 @@ class SyncPipeline:
                             status="succeeded",
                             new_documents=new_documents,
                             changed_documents=changed_documents,
+                            metadata_changed_documents=metadata_changed_documents,
                             deleted_documents=deleted_documents,
                             unchanged_documents=unchanged_documents,
                             embedded_chunks=embedded_chunks,
@@ -159,6 +175,7 @@ class SyncPipeline:
                         status="failed",
                         new_documents=new_documents,
                         changed_documents=changed_documents,
+                        metadata_changed_documents=metadata_changed_documents,
                         deleted_documents=deleted_documents,
                         unchanged_documents=unchanged_documents,
                         embedded_chunks=0,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -49,18 +50,20 @@ class BusyPipeline:
 class SearchStore(ClosingStore):
     def __init__(self) -> None:
         super().__init__()
-        self.search_call: tuple[list[float], str, int] | None = None
+        self.search_call: tuple[list[float], str, int, Mapping[str, Any] | None] | None = None
 
     def search(
         self,
         query_embedding: list[float],
         model_name: str,
         limit: int,
+        metadata_filter: Mapping[str, Any] | None = None,
     ) -> list[SearchResult]:
         self.search_call = (
             query_embedding,
             model_name,
             limit,
+            metadata_filter,
         )
 
         return [
@@ -279,6 +282,7 @@ def test_search_returns_structured_results_and_closes_store(
         [1.0, 0.0, 0.0],
         payload["embedding_model"],
         3,
+        None,
     )
     assert store.closed is True
 
@@ -467,3 +471,98 @@ def test_evaluate_failure_returns_structured_error_and_closes_store(
         "error": "RuntimeError: Query embedding failed",
     }
     assert store.closed is True
+
+
+def test_search_forwards_metadata_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SearchStore()
+
+    monkeypatch.setattr(
+        cli,
+        "make_store",
+        lambda settings: store,
+    )
+    monkeypatch.setattr(
+        cli,
+        "LocalSentenceTransformerProvider",
+        FakeSearchEmbedder,
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "search",
+            "--query",
+            "What is Ragpipe?",
+            "--limit",
+            "3",
+            "--metadata",
+            '{"department":"hr","tags":["policy"]}',
+        ],
+    )
+
+    assert result.exit_code == 0
+
+    payload = json.loads(result.stdout)
+
+    expected_filter = {
+        "department": "hr",
+        "tags": ["policy"],
+    }
+
+    assert payload["metadata_filter"] == expected_filter
+    assert store.search_call == (
+        [1.0, 0.0, 0.0],
+        payload["embedding_model"],
+        3,
+        expected_filter,
+    )
+    assert store.closed is True
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected_message"),
+    [
+        ('{"department":', "Metadata filter must be valid JSON"),
+        ('["hr"]', "Metadata filter must be a JSON object"),
+        ('"hr"', "Metadata filter must be a JSON object"),
+        ("NaN", "Metadata filter must be valid JSON"),
+    ],
+)
+def test_search_rejects_invalid_metadata_before_opening_store(
+    metadata: str,
+    expected_message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_store_creation(settings: Settings) -> ClosingStore:
+        raise AssertionError("Store must not be opened for invalid metadata")
+
+    class UnexpectedEmbedder:
+        def __init__(self, **kwargs: Any) -> None:
+            raise AssertionError("Embedder must not be loaded for invalid metadata")
+
+    monkeypatch.setattr(
+        cli,
+        "make_store",
+        unexpected_store_creation,
+    )
+    monkeypatch.setattr(
+        cli,
+        "LocalSentenceTransformerProvider",
+        UnexpectedEmbedder,
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "search",
+            "--query",
+            "What is Ragpipe?",
+            "--metadata",
+            metadata,
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert expected_message in result.output

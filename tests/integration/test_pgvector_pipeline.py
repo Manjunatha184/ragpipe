@@ -10,6 +10,7 @@ from alembic.config import Config
 
 from alembic import command
 from ragpipe.chunking.chunker import RecursiveCharacterChunker
+from ragpipe.ingest.metadata import metadata_hash
 from ragpipe.models import Chunk
 from ragpipe.pipeline import SyncFailedError, SyncPipeline
 from ragpipe.store.base import SyncLockUnavailableError
@@ -412,3 +413,204 @@ def test_vector_search_hnsw_index_exists(
 
     assert "using hnsw" in index_definition
     assert "vector_cosine_ops" in index_definition
+
+
+def test_document_metadata_is_stored_updated_and_filtered(
+    pgvector_store: PgVectorStore,
+) -> None:
+    original_metadata = {
+        "department": "hr",
+        "tags": ["leave", "policy"],
+    }
+
+    with pgvector_store.transaction():
+        pgvector_store.replace_document(
+            path="policy.md",
+            content_hash="d" * 64,
+            media_type="text/markdown",
+            size_bytes=12,
+            chunks=[
+                Chunk(
+                    index=0,
+                    text="Leave policy",
+                    content_hash="c" * 64,
+                    metadata={"chunk_index": 0},
+                )
+            ],
+            embeddings=[make_search_vector(1.0, 0.0)],
+            model_name="search-test-model",
+            document_metadata=original_metadata,
+            metadata_hash=metadata_hash(original_metadata),
+        )
+
+    matching = pgvector_store.search(
+        query_embedding=make_search_vector(1.0, 0.0),
+        model_name="search-test-model",
+        limit=5,
+        metadata_filter={"department": "hr"},
+    )
+
+    assert len(matching) == 1
+    assert matching[0].metadata == {
+        "department": "hr",
+        "tags": ["leave", "policy"],
+        "chunk_index": 0,
+    }
+
+    not_matching = pgvector_store.search(
+        query_embedding=make_search_vector(1.0, 0.0),
+        model_name="search-test-model",
+        limit=5,
+        metadata_filter={"department": "finance"},
+    )
+
+    assert not_matching == []
+
+    with pgvector_store.transaction():
+        document = pgvector_store.document_states()["policy.md"]
+
+        updated_metadata = {
+            "department": "finance",
+            "tags": ["policy"],
+        }
+
+        pgvector_store.update_document_metadata(
+            document_id=document.id,
+            document_metadata=updated_metadata,
+            metadata_hash=metadata_hash(updated_metadata),
+        )
+
+    updated = pgvector_store.search(
+        query_embedding=make_search_vector(1.0, 0.0),
+        model_name="search-test-model",
+        limit=5,
+        metadata_filter={"department": "finance"},
+    )
+
+    assert len(updated) == 1
+    assert updated[0].metadata["department"] == "finance"
+
+
+def test_pipeline_metadata_only_change_preserves_existing_chunks(
+    tmp_path: Path,
+    pgvector_store: PgVectorStore,
+) -> None:
+    document = tmp_path / "policy.md"
+    document.write_text(
+        "Employees receive annual leave.",
+        encoding="utf-8",
+    )
+
+    embedder = PgVectorFakeEmbedder()
+    pipeline = create_pipeline(
+        pgvector_store,
+        embedder=embedder,
+    )
+
+    first = pipeline.sync(tmp_path)
+
+    assert first.new_documents == 1
+    assert first.embedded_chunks == 1
+
+    embedding_calls_before = embedder.calls
+
+    if TEST_DATABASE_URL is None:
+        pytest.fail("RAGPIPE_TEST_DATABASE_URL unexpectedly missing")
+
+    with psycopg.connect(TEST_DATABASE_URL) as connection:
+        chunk_before = connection.execute(
+            """
+            SELECT chunks.id::text
+            FROM chunks
+            JOIN documents
+              ON documents.id = chunks.document_id
+            WHERE documents.path = %s
+            """,
+            ("policy.md",),
+        ).fetchone()
+
+    assert chunk_before is not None
+
+    (tmp_path / ".ragpipe-metadata.json").write_text(
+        """
+        {
+          "policy.md": {
+            "department": "hr",
+            "tags": ["leave", "policy"]
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    changed = pipeline.sync(tmp_path)
+
+    assert changed.new_documents == 0
+    assert changed.changed_documents == 0
+    assert changed.metadata_changed_documents == 1
+    assert changed.deleted_documents == 0
+    assert changed.unchanged_documents == 0
+    assert changed.embedded_chunks == 0
+    assert changed.deleted_chunks == 0
+    assert embedder.calls == embedding_calls_before
+
+    with psycopg.connect(TEST_DATABASE_URL) as connection:
+        chunk_after = connection.execute(
+            """
+            SELECT chunks.id::text
+            FROM chunks
+            JOIN documents
+              ON documents.id = chunks.document_id
+            WHERE documents.path = %s
+            """,
+            ("policy.md",),
+        ).fetchone()
+
+    # The same chunk remains—the pipeline did not delete and recreate it.
+    assert chunk_after == chunk_before
+
+    matching = pgvector_store.search(
+        query_embedding=make_search_vector(1.0, 0.0),
+        model_name=embedder.model_name,
+        limit=5,
+        metadata_filter={"department": "hr"},
+    )
+
+    assert len(matching) == 1
+    assert matching[0].document_path == "policy.md"
+    assert matching[0].metadata["department"] == "hr"
+    assert matching[0].metadata["tags"] == ["leave", "policy"]
+
+    nonmatching = pgvector_store.search(
+        query_embedding=make_search_vector(1.0, 0.0),
+        model_name=embedder.model_name,
+        limit=5,
+        metadata_filter={"department": "finance"},
+    )
+
+    assert nonmatching == []
+
+
+def test_document_metadata_gin_index_exists(
+    pgvector_store: PgVectorStore,
+) -> None:
+    if TEST_DATABASE_URL is None:
+        pytest.fail("RAGPIPE_TEST_DATABASE_URL unexpectedly missing")
+
+    with psycopg.connect(TEST_DATABASE_URL) as connection:
+        row = connection.execute(
+            """
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'documents'
+              AND indexname = 'documents_metadata_gin_idx'
+            """
+        ).fetchone()
+
+    assert row is not None
+
+    index_definition = str(row[0]).lower()
+
+    assert "using gin" in index_definition
+    assert "jsonb_path_ops" in index_definition

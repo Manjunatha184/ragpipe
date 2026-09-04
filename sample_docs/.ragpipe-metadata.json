@@ -1,0 +1,7 @@
+{
+  "welcome.md": {
+    "department": "engineering",
+    "tags": ["demo", "rag"],
+    "access_groups": ["developers"]
+  }
+}

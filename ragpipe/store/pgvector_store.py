@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
 
@@ -11,6 +11,7 @@ from psycopg import Connection
 from psycopg_pool import ConnectionPool
 
 from ragpipe.models import (
+    EMPTY_METADATA_HASH,
     Chunk,
     DocumentState,
     SearchResult,
@@ -19,8 +20,22 @@ from ragpipe.models import (
 )
 from ragpipe.store.base import Store, SyncLockUnavailableError
 
-EXPECTED_SCHEMA_REVISION = "0002_vector_search_index"
+EXPECTED_SCHEMA_REVISION = "0004_document_metadata_index"
 SYNC_LOCK_NAME = "ragpipe:global-sync"
+
+
+def _serialize_metadata(
+    metadata: Mapping[str, Any],
+) -> str:
+    try:
+        return json.dumps(
+            dict(metadata),
+            sort_keys=True,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("Metadata must contain valid JSON values") from error
 
 
 class SchemaNotReadyError(RuntimeError):
@@ -164,7 +179,17 @@ class PgVectorStore(Store):
 
     def document_states(self) -> dict[str, DocumentState]:
         with self._active().cursor() as cur:
-            cur.execute("SELECT id::text, path, content_hash FROM documents")
+            cur.execute(
+                """
+                SELECT
+                    id::text,
+                    path,
+                    content_hash,
+                    metadata_hash
+                FROM documents
+                """
+            )
+
             return {row[1]: DocumentState(*row) for row in cur.fetchall()}
 
     def delete_document(self, document_id: str) -> int:
@@ -187,47 +212,152 @@ class PgVectorStore(Store):
         chunks: Sequence[Chunk],
         embeddings: Sequence[Sequence[float]],
         model_name: str,
+        document_metadata: Mapping[str, Any] | None = None,
+        metadata_hash: str = EMPTY_METADATA_HASH,
     ) -> int:
         if len(chunks) != len(embeddings):
             raise ValueError("Each chunk must have exactly one embedding")
+
+        serialized_metadata = _serialize_metadata(document_metadata or {})
         conn = self._active()
         document_id = uuid.uuid4()
+
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM documents WHERE path = %s", (path,))
             cur.execute(
-                """INSERT INTO documents(id,path,content_hash,media_type,size_bytes)
-                   VALUES(%s,%s,%s,%s,%s)""",
-                (document_id, path, content_hash, media_type, size_bytes),
+                "DELETE FROM documents WHERE path = %s",
+                (path,),
+            )
+            cur.execute(
+                """
+                INSERT INTO documents(
+                    id,
+                    path,
+                    content_hash,
+                    media_type,
+                    size_bytes,
+                    metadata,
+                    metadata_hash
+                )
+                VALUES(%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    document_id,
+                    path,
+                    content_hash,
+                    media_type,
+                    size_bytes,
+                    serialized_metadata,
+                    metadata_hash,
+                ),
             )
             cur.executemany(
-                """INSERT INTO chunks(id,document_id,chunk_index,content,content_hash,metadata,
-                   embedding_model,embedding) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+                """
+                INSERT INTO chunks(
+                    id,
+                    document_id,
+                    chunk_index,
+                    content,
+                    content_hash,
+                    metadata,
+                    embedding_model,
+                    embedding
+                )
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
                 [
                     (
                         uuid.uuid4(),
                         document_id,
-                        c.index,
-                        c.text,
-                        c.content_hash,
-                        json.dumps(c.metadata),
+                        chunk.index,
+                        chunk.text,
+                        chunk.content_hash,
+                        _serialize_metadata(chunk.metadata),
                         model_name,
-                        list(e),
+                        list(embedding),
                     )
-                    for c, e in zip(chunks, embeddings, strict=True)
+                    for chunk, embedding in zip(
+                        chunks,
+                        embeddings,
+                        strict=True,
+                    )
                 ],
             )
+
         return len(chunks)
 
-    def record_run(self, result: SyncResult, source: str, error: str | None = None) -> None:
+    def update_document_metadata(
+        self,
+        document_id: str,
+        document_metadata: Mapping[str, Any],
+        metadata_hash: str,
+    ) -> None:
         with self._active().cursor() as cur:
             cur.execute(
-                """INSERT INTO sync_runs VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                """
+                UPDATE documents
+                SET
+                    metadata = %s,
+                    metadata_hash = %s,
+                    last_synced_at = now()
+                WHERE id = %s
+                """,
+                (
+                    _serialize_metadata(document_metadata),
+                    metadata_hash,
+                    document_id,
+                ),
+            )
+
+            if cur.rowcount != 1:
+                raise RuntimeError(f"Document does not exist: {document_id}")
+
+    def record_run(
+        self,
+        result: SyncResult,
+        source: str,
+        error: str | None = None,
+    ) -> None:
+        with self._active().cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO sync_runs(
+                    id,
+                    source,
+                    status,
+                    new_documents,
+                    changed_documents,
+                    metadata_changed_documents,
+                    deleted_documents,
+                    unchanged_documents,
+                    embedded_chunks,
+                    deleted_chunks,
+                    started_at,
+                    finished_at,
+                    error
+                )
+                VALUES(
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+                """,
                 (
                     result.run_id,
                     source,
                     result.status,
                     result.new_documents,
                     result.changed_documents,
+                    result.metadata_changed_documents,
                     result.deleted_documents,
                     result.unchanged_documents,
                     result.embedded_chunks,
@@ -243,8 +373,9 @@ class PgVectorStore(Store):
         query_embedding: Sequence[float],
         model_name: str,
         limit: int,
+        metadata_filter: Mapping[str, Any] | None = None,
     ) -> list[SearchResult]:
-        """Return the nearest compatible chunks using cosine similarity."""
+        """Return compatible chunks using cosine similarity."""
 
         if limit <= 0:
             raise ValueError("Search limit must be greater than zero")
@@ -252,38 +383,50 @@ class PgVectorStore(Store):
         if not query_embedding:
             raise ValueError("Query embedding must not be empty")
 
+        serialized_filter = (
+            None if metadata_filter is None else _serialize_metadata(metadata_filter)
+        )
+
         with self._pool.connection() as conn:
             register_vector(conn)
 
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    WITH query_vector AS (
-                        SELECT %s::vector AS embedding
+                    WITH query_input AS (
+                        SELECT
+                            %s::vector AS embedding,
+                            %s::jsonb AS metadata_filter
                     )
                     SELECT
                         documents.path,
                         chunks.chunk_index,
                         chunks.content,
-                        chunks.metadata,
+                        documents.metadata || chunks.metadata,
                         chunks.embedding_model,
                         1 - (
                             chunks.embedding
-                            <=> query_vector.embedding
+                            <=> query_input.embedding
                         ) AS score
                     FROM chunks
                     JOIN documents
                       ON documents.id = chunks.document_id
-                    CROSS JOIN query_vector
+                    CROSS JOIN query_input
                     WHERE chunks.embedding_model = %s
+                      AND (
+                          query_input.metadata_filter IS NULL
+                          OR documents.metadata
+                             @> query_input.metadata_filter
+                      )
                     ORDER BY
-                        chunks.embedding <=> query_vector.embedding,
+                        chunks.embedding <=> query_input.embedding,
                         documents.path,
                         chunks.chunk_index
                     LIMIT %s
                     """,
                     (
                         list(query_embedding),
+                        serialized_filter,
                         model_name,
                         limit,
                     ),
