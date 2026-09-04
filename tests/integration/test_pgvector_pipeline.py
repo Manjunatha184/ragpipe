@@ -11,6 +11,7 @@ from alembic.config import Config
 from alembic import command
 from ragpipe.chunking.chunker import RecursiveCharacterChunker
 from ragpipe.ingest.metadata import metadata_hash
+from ragpipe.ingest.source import LocalFolderSource
 from ragpipe.models import Chunk
 from ragpipe.pipeline import SyncFailedError, SyncPipeline
 from ragpipe.store.base import SyncLockUnavailableError
@@ -152,7 +153,7 @@ def test_complete_document_lifecycle(
     pipeline = create_pipeline(pgvector_store)
 
     # First run: document and vector must be inserted.
-    first = pipeline.sync(tmp_path)
+    first = pipeline.sync(LocalFolderSource(tmp_path))
 
     assert first.new_documents == 1
     assert first.embedded_chunks == 1
@@ -164,7 +165,7 @@ def test_complete_document_lifecycle(
     assert first_status.chunks == 1
 
     # Second run: unchanged document must not be embedded again.
-    second = pipeline.sync(tmp_path)
+    second = pipeline.sync(LocalFolderSource(tmp_path))
 
     assert second.new_documents == 0
     assert second.changed_documents == 0
@@ -183,7 +184,7 @@ def test_complete_document_lifecycle(
         encoding="utf-8",
     )
 
-    changed = pipeline.sync(tmp_path)
+    changed = pipeline.sync(LocalFolderSource(tmp_path))
 
     assert changed.changed_documents == 1
     assert changed.embedded_chunks == 1
@@ -197,7 +198,7 @@ def test_complete_document_lifecycle(
     # Fourth run: deleting the source must remove its vector.
     document.unlink()
 
-    deleted = pipeline.sync(tmp_path)
+    deleted = pipeline.sync(LocalFolderSource(tmp_path))
 
     assert deleted.deleted_documents == 1
     assert deleted.deleted_chunks == 1
@@ -222,7 +223,7 @@ def test_failed_changed_document_sync_rolls_back(
     document.write_text("Original policy", encoding="utf-8")
 
     working_pipeline = create_pipeline(pgvector_store)
-    working_pipeline.sync(tmp_path)
+    working_pipeline.sync(LocalFolderSource(tmp_path))
 
     original_status = pgvector_store.status()
 
@@ -240,7 +241,7 @@ def test_failed_changed_document_sync_rolls_back(
         SyncFailedError,
         match="Simulated embedding failure",
     ):
-        failing_pipeline.sync(tmp_path)
+        failing_pipeline.sync(LocalFolderSource(tmp_path))
 
     # The original document and vector must still exist after rollback.
     rolled_back_status = pgvector_store.status()
@@ -524,7 +525,7 @@ def test_pipeline_metadata_only_change_preserves_existing_chunks(
         embedder=embedder,
     )
 
-    first = pipeline.sync(tmp_path)
+    first = pipeline.sync(LocalFolderSource(tmp_path))
 
     assert first.new_documents == 1
     assert first.embedded_chunks == 1
@@ -560,7 +561,7 @@ def test_pipeline_metadata_only_change_preserves_existing_chunks(
         encoding="utf-8",
     )
 
-    changed = pipeline.sync(tmp_path)
+    changed = pipeline.sync(LocalFolderSource(tmp_path))
 
     assert changed.new_documents == 0
     assert changed.changed_documents == 0
@@ -648,7 +649,7 @@ def test_sync_operational_metrics_are_persisted(
     result = create_pipeline(
         pgvector_store,
         embedder=embedder,
-    ).sync(tmp_path)
+    ).sync(LocalFolderSource(tmp_path))
 
     if TEST_DATABASE_URL is None:
         pytest.fail("RAGPIPE_TEST_DATABASE_URL unexpectedly missing")

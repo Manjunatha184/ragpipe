@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 
 from ragpipe.chunking.chunker import RecursiveCharacterChunker
+from ragpipe.ingest.source import LocalFolderSource
+from ragpipe.models import ScannedDocument
 from ragpipe.pipeline import (
     SyncAlreadyRunningError,
     SyncFailedError,
@@ -21,9 +23,9 @@ def make_pipeline() -> tuple[SyncPipeline, MemoryStore, FakeEmbedder]:
 def test_full_sync_is_idempotent(tmp_path: Path) -> None:
     (tmp_path / "a.md").write_text("one document")
     pipeline, store, embedder = make_pipeline()
-    first = pipeline.sync(tmp_path)
+    first = pipeline.sync(LocalFolderSource(tmp_path))
     writes_after_first, texts_after_first = store.write_count, embedder.texts
-    second = pipeline.sync(tmp_path)
+    second = pipeline.sync(LocalFolderSource(tmp_path))
     assert first.new_documents == 1 and first.embedded_chunks == 1
     assert second.unchanged_documents == 1 and second.embedded_chunks == 0
     assert store.write_count == writes_after_first
@@ -42,10 +44,10 @@ def test_change_only_reembeds_changed_file(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("A")
     (tmp_path / "b.txt").write_text("B")
     pipeline, store, embedder = make_pipeline()
-    pipeline.sync(tmp_path)
+    pipeline.sync(LocalFolderSource(tmp_path))
     before = embedder.texts
     (tmp_path / "b.txt").write_text("B changed")
-    result = pipeline.sync(tmp_path)
+    result = pipeline.sync(LocalFolderSource(tmp_path))
     assert result.changed_documents == 1 and result.unchanged_documents == 1
     assert embedder.texts == before + 1
     assert store.status().documents == 2
@@ -55,10 +57,10 @@ def test_delete_removes_all_chunks_without_embedding(tmp_path: Path) -> None:
     path = tmp_path / "large.md"
     path.write_text("content " * 30)
     pipeline, store, embedder = make_pipeline()
-    pipeline.sync(tmp_path)
+    pipeline.sync(LocalFolderSource(tmp_path))
     original_chunks, before = store.status().chunks, embedder.texts
     path.unlink()
-    result = pipeline.sync(tmp_path)
+    result = pipeline.sync(LocalFolderSource(tmp_path))
     assert result.deleted_documents == 1 and result.deleted_chunks == original_chunks
     assert embedder.texts == before
     assert store.status().documents == 0 and store.status().chunks == 0
@@ -67,7 +69,7 @@ def test_delete_removes_all_chunks_without_embedding(tmp_path: Path) -> None:
 def test_empty_document_is_tracked_without_embedding(tmp_path: Path) -> None:
     (tmp_path / "empty.txt").write_text("")
     pipeline, store, embedder = make_pipeline()
-    result = pipeline.sync(tmp_path)
+    result = pipeline.sync(LocalFolderSource(tmp_path))
     assert result.new_documents == 1 and result.embedded_chunks == 0
     assert embedder.calls == 0 and store.status().documents == 1
 
@@ -87,7 +89,7 @@ def test_failed_sync_is_recorded_after_rollback(
     )
 
     pipeline, store, _ = make_pipeline()
-    pipeline.sync(tmp_path)
+    pipeline.sync(LocalFolderSource(tmp_path))
 
     original_state = store.documents["policy.txt"]
     original_chunk_count = store.status().chunks
@@ -107,7 +109,7 @@ def test_failed_sync_is_recorded_after_rollback(
         SyncFailedError,
         match="Embedding service unavailable",
     ) as captured:
-        failing_pipeline.sync(tmp_path)
+        failing_pipeline.sync(LocalFolderSource(tmp_path))
 
     assert captured.value.run_id == store.runs[-1].run_id
     assert store.runs[-1].status == "failed"
@@ -154,7 +156,7 @@ def test_lock_contention_does_not_start_or_record_sync(
         SyncAlreadyRunningError,
         match="already running",
     ):
-        pipeline.sync(tmp_path)
+        pipeline.sync(LocalFolderSource(tmp_path))
 
     assert store.documents == {}
     assert store.runs == []
@@ -172,7 +174,7 @@ def test_metadata_only_change_updates_metadata_without_reembedding(
     )
 
     pipeline, store, embedder = make_pipeline()
-    pipeline.sync(tmp_path)
+    pipeline.sync(LocalFolderSource(tmp_path))
 
     original_state = store.documents["policy.md"]
     original_chunk_count = store.status().chunks
@@ -192,7 +194,7 @@ def test_metadata_only_change_updates_metadata_without_reembedding(
         encoding="utf-8",
     )
 
-    result = pipeline.sync(tmp_path)
+    result = pipeline.sync(LocalFolderSource(tmp_path))
 
     updated_state = store.documents["policy.md"]
 
@@ -219,3 +221,45 @@ def test_metadata_only_change_updates_metadata_without_reembedding(
         "tags": ["leave", "policy"],
     }
     assert store.write_count == original_write_count + 1
+
+
+class InMemoryDocumentSource:
+    """A non-filesystem source used to verify the source contract."""
+
+    def __init__(self) -> None:
+        self.load_calls: list[str] = []
+
+    @property
+    def label(self) -> str:
+        return "memory://test-documents"
+
+    def scan(self) -> dict[str, ScannedDocument]:
+        return {
+            "virtual.txt": ScannedDocument(
+                path="virtual.txt",
+                content_hash="a" * 64,
+                size_bytes=len(b"Virtual document content"),
+                media_type="text/plain",
+            )
+        }
+
+    def load(self, document: ScannedDocument) -> str:
+        self.load_calls.append(document.path)
+        return "Virtual document content"
+
+
+def test_pipeline_accepts_document_source_without_local_files() -> None:
+    pipeline, store, embedder = make_pipeline()
+    source = InMemoryDocumentSource()
+
+    result = pipeline.sync(source)
+
+    assert result.status == "succeeded"
+    assert result.new_documents == 1
+    assert result.scanned_documents == 1
+    assert result.scanned_bytes == len(b"Virtual document content")
+    assert result.embedded_chunks == 1
+
+    assert source.load_calls == ["virtual.txt"]
+    assert embedder.texts == 1
+    assert "virtual.txt" in store.documents

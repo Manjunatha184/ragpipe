@@ -3,15 +3,14 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 from time import perf_counter
 
 import structlog
 
 from ragpipe.chunking.chunker import Chunker
 from ragpipe.embedding.base import EmbeddingProvider
-from ragpipe.ingest.loaders import load_text
-from ragpipe.ingest.source_scanner import diff_source, scan_source
+from ragpipe.ingest.source import DocumentSource
+from ragpipe.ingest.source_scanner import diff_source
 from ragpipe.models import SyncResult
 from ragpipe.store.base import Store, SyncLockUnavailableError
 
@@ -69,10 +68,10 @@ class SyncPipeline:
         self.embedder = embedder
         self.batch_size = batch_size
 
-    def sync(self, source: Path) -> SyncResult:
+    def sync(self, source: DocumentSource) -> SyncResult:
         started = datetime.now(UTC)
         run_id = str(uuid.uuid4())
-        source_label = str(source.expanduser().resolve())
+        source_label = source.label
 
         new_documents = 0
         changed_documents = 0
@@ -89,7 +88,7 @@ class SyncPipeline:
         try:
             with self.store.sync_lock():
                 try:
-                    scanned = scan_source(source)
+                    scanned = source.scan()
                     scanned_documents = len(scanned)
                     scanned_bytes = sum(document.size_bytes for document in scanned.values())
 
@@ -123,7 +122,7 @@ class SyncPipeline:
                             if prior:
                                 deleted_chunks += self.store.delete_document(prior.id)
 
-                            chunks = self.chunker.chunk(load_text(item.absolute_path))
+                            chunks = self.chunker.chunk(source.load(item))
                             embeddings: list[list[float]] = []
 
                             for batch_start in range(

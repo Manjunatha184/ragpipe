@@ -9,6 +9,8 @@
 ## What is implemented
 
 - Recursive local-folder discovery for `.pdf`, `.md`, `.markdown`, and `.txt`; document symlinks are ignored
+- A `DocumentSource` protocol that separates synchronization from source-specific scanning and loading
+- A tested `LocalFolderSource` implementation with source-root path protection
 - SHA-256 content and metadata change detection instead of unreliable modification timestamps
 - Optional per-document metadata through `.ragpipe-metadata.json`
 - Metadata-only updates without deleting chunks or regenerating embeddings
@@ -36,15 +38,18 @@ Chat/answer generation, a web UI, authentication, authorization, and multi-tenan
 
 ```mermaid
 flowchart TD
-    A[Documents and metadata manifest] --> B[Scanner and deterministic diff]
+    L[Local folder and metadata manifest] --> S[LocalFolderSource]
+    S --> P[DocumentSource protocol]
+    P --> B[Scanner and deterministic diff]
     B -->|new or content changed| C[Load, chunk, and embed]
     C --> D[(PostgreSQL and pgvector)]
-    B -->|metadata only| D
-    B -->|deleted| D
+    B -->|metadata only or deleted| D
     Q[Search or evaluation query] --> E[Query embedding and filters]
     E --> D
     D --> R[Ranked matching chunks]
 ```
+
+`SyncPipeline` depends on the `DocumentSource` protocol instead of directly depending on a filesystem path. A source supplies a stable label, scans its current documents, and loads document text when required. `LocalFolderSource` provides the current filesystem implementation. This boundary allows future object-store sources to reuse the same diff, chunking, embedding, transaction, and observability logic.
 
 The scanner compares the current source with the document state stored in PostgreSQL. The synchronization pipeline then applies the calculated changes inside one database transaction.
 
@@ -71,29 +76,22 @@ Requirements:
 ```bash
 cp .env.example .env
 docker compose up -d
-
 python -m venv .venv
 source .venv/bin/activate
-
 pip install -e '.[local,dev]'
 alembic upgrade head
-
 ragpipe sync --source ./sample_docs
 ragpipe sync --source ./sample_docs
 ragpipe status
-
 ragpipe search \
   --query "What is Ragpipe?" \
   --limit 5
-
 ragpipe search \
   --query "What is Ragpipe?" \
   --metadata '{"department":"engineering"}'
-
 ragpipe evaluate \
   --dataset evaluation/sample.jsonl \
   --k 5
-
 ragpipe runs --limit 10
 ```
 
@@ -371,6 +369,7 @@ python -m build
 
 The test suite includes:
 
+- `DocumentSource` integration, local-folder loading, and source-root path traversal protection
 - New, changed, metadata-changed, deleted, and unchanged detection
 - Idempotent synchronization and metadata-only updates without re-embedding
 - Changed-document replacement and deleted-document cleanup
@@ -398,11 +397,14 @@ The database-name guard prevents integration fixtures from resetting the develop
 
 Implement `EmbeddingProvider` to add another local model or an API provider such as OpenAI or Cohere. Implement `Chunker` to add semantic or document-aware splitting.
 
-Object-store scanners can feed the same `ScannedDocument` and `SourceDiff` contracts. Future releases can add authenticated access-control enforcement, multi-source tenancy, cloud sources, evaluation-result persistence, provider-reported embedding cost, and Prometheus/OpenTelemetry export.
+Implement `DocumentSource` to add another document system. A source must provide a stable label, return documents keyed by stable source-relative paths, and load extracted document text. `SyncPipeline` can then apply the existing change detection, metadata handling, chunking, embedding, transactional storage, and operational metrics without knowing where the documents originated.
+
+`LocalFolderSource` is the currently available implementation. Future releases can add an S3 source, authenticated access-control enforcement, multi-source tenancy, evaluation-result persistence, provider-reported embedding cost, and Prometheus/OpenTelemetry export.
 
 ## Operational limitations
 
-- The current version owns one database corpus and one local source root; multi-source tenancy is not implemented.
+- The current version owns one database corpus and accepts one source per synchronization; multi-source tenancy is not implemented.
+- `LocalFolderSource` is currently the only production source implementation; cloud object-store sources are not yet included.
 - Alembic migrations must be applied before running a newer application version.
 - Empty documents are tracked but create no chunks.
 - Scanned paths are relative to the source root; moving a file is modeled as deletion plus addition.
