@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Generator, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import psycopg
@@ -12,7 +13,7 @@ from alembic import command
 from ragpipe.chunking.chunker import RecursiveCharacterChunker
 from ragpipe.ingest.metadata import metadata_hash
 from ragpipe.ingest.source import LocalFolderSource
-from ragpipe.models import Chunk
+from ragpipe.models import Chunk, SyncResult
 from ragpipe.pipeline import SyncFailedError, SyncPipeline
 from ragpipe.store.base import SyncLockUnavailableError
 from ragpipe.store.pgvector_store import PgVectorStore
@@ -699,3 +700,88 @@ def test_sync_operational_metrics_are_persisted(
     assert recent[0].embedding_duration_ms >= 0
     assert recent[0].duration_ms >= 0
     assert recent[0].error is None
+
+
+def test_operational_metrics_snapshot_aggregates_all_runs(
+    pgvector_store: PgVectorStore,
+) -> None:
+    started = datetime(
+        2026,
+        9,
+        4,
+        13,
+        0,
+        tzinfo=UTC,
+    )
+    succeeded = SyncResult(
+        run_id="00000000-0000-0000-0000-000000000001",
+        status="succeeded",
+        new_documents=1,
+        changed_documents=2,
+        metadata_changed_documents=3,
+        deleted_documents=4,
+        unchanged_documents=5,
+        embedded_chunks=6,
+        deleted_chunks=7,
+        scanned_documents=8,
+        scanned_bytes=900,
+        embedding_batches=10,
+        embedding_duration_ms=11.5,
+        started_at=started,
+        finished_at=started + timedelta(milliseconds=100),
+    )
+    failed_started = started + timedelta(seconds=1)
+    failed = SyncResult(
+        run_id="00000000-0000-0000-0000-000000000002",
+        status="failed",
+        new_documents=0,
+        changed_documents=1,
+        metadata_changed_documents=0,
+        deleted_documents=0,
+        unchanged_documents=0,
+        embedded_chunks=0,
+        deleted_chunks=0,
+        scanned_documents=2,
+        scanned_bytes=100,
+        embedding_batches=1,
+        embedding_duration_ms=2.5,
+        started_at=failed_started,
+        finished_at=failed_started + timedelta(milliseconds=250),
+    )
+
+    with pgvector_store.transaction():
+        pgvector_store.record_run(
+            succeeded,
+            source="/documents",
+        )
+        pgvector_store.record_run(
+            failed,
+            source="s3://documents/knowledge",
+            error="RuntimeError: test failure",
+        )
+
+    snapshot = pgvector_store.operational_metrics()
+
+    assert snapshot.documents == 0
+    assert snapshot.chunks == 0
+
+    assert snapshot.sync_runs_running == 0
+    assert snapshot.sync_runs_succeeded == 1
+    assert snapshot.sync_runs_failed == 1
+
+    assert snapshot.new_documents_total == 1
+    assert snapshot.changed_documents_total == 3
+    assert snapshot.metadata_changed_documents_total == 3
+    assert snapshot.deleted_documents_total == 4
+    assert snapshot.unchanged_documents_total == 5
+
+    assert snapshot.embedded_chunks_total == 6
+    assert snapshot.deleted_chunks_total == 7
+    assert snapshot.scanned_documents_total == 10
+    assert snapshot.scanned_bytes_total == 1000
+    assert snapshot.embedding_batches_total == 11
+    assert snapshot.embedding_duration_ms_total == pytest.approx(14.0)
+
+    assert snapshot.last_sync_status == "failed"
+    assert snapshot.last_sync_at == failed.finished_at
+    assert snapshot.last_sync_duration_ms == pytest.approx(250.0)

@@ -11,6 +11,7 @@ from ragpipe.models import (
     EMPTY_METADATA_HASH,
     Chunk,
     DocumentState,
+    OperationalMetricsSnapshot,
     SearchResult,
     StoreStatus,
     SyncResult,
@@ -176,6 +177,39 @@ class MemoryStore(Store):
             raise ValueError("Search limit must be greater than zero")
 
         return []
+
+    def operational_metrics(
+        self,
+    ) -> OperationalMetricsSnapshot:
+        latest = self.run_records[-1] if self.run_records else None
+
+        return OperationalMetricsSnapshot(
+            documents=len(self.documents),
+            chunks=sum(self.chunk_counts.values()),
+            sync_runs_running=sum(record.status == "running" for record in self.run_records),
+            sync_runs_succeeded=sum(record.status == "succeeded" for record in self.run_records),
+            sync_runs_failed=sum(record.status == "failed" for record in self.run_records),
+            new_documents_total=sum(record.new_documents for record in self.run_records),
+            changed_documents_total=sum(record.changed_documents for record in self.run_records),
+            metadata_changed_documents_total=sum(
+                record.metadata_changed_documents for record in self.run_records
+            ),
+            deleted_documents_total=sum(record.deleted_documents for record in self.run_records),
+            unchanged_documents_total=sum(
+                record.unchanged_documents for record in self.run_records
+            ),
+            embedded_chunks_total=sum(record.embedded_chunks for record in self.run_records),
+            deleted_chunks_total=sum(record.deleted_chunks for record in self.run_records),
+            scanned_documents_total=sum(record.scanned_documents for record in self.run_records),
+            scanned_bytes_total=sum(record.scanned_bytes for record in self.run_records),
+            embedding_batches_total=sum(record.embedding_batches for record in self.run_records),
+            embedding_duration_ms_total=sum(
+                record.embedding_duration_ms for record in self.run_records
+            ),
+            last_sync_status=(latest.status if latest else None),
+            last_sync_at=(latest.finished_at if latest else None),
+            last_sync_duration_ms=(latest.duration_ms if latest else None),
+        )
 
     def status(self) -> StoreStatus:
         return StoreStatus(

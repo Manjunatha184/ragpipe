@@ -26,6 +26,10 @@ from ragpipe.ingest.source import (
     LocalFolderSource,
 )
 from ragpipe.logging import configure_logging
+from ragpipe.metrics import (
+    render_prometheus_metrics,
+    serve_prometheus_metrics,
+)
 from ragpipe.pipeline import (
     SyncAlreadyRunningError,
     SyncFailedError,
@@ -441,6 +445,106 @@ def runs(
             json.dumps(
                 {
                     "status": "run_history_failed",
+                    "error": sanitize_error(error),
+                },
+                indent=2,
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+
+    finally:
+        if store is not None:
+            store.close()
+
+
+@app.command()
+def metrics() -> None:
+    """Print a Prometheus snapshot to standard output."""
+
+    settings = Settings()
+    configure_logging(settings.log_level)
+
+    store: PgVectorStore | None = None
+
+    try:
+        store = make_store(settings)
+        typer.echo(
+            render_prometheus_metrics(store.operational_metrics()),
+            nl=False,
+        )
+
+    except SchemaNotReadyError as error:
+        print_schema_error(error)
+        raise typer.Exit(code=2) from None
+
+    except Exception as error:
+        typer.echo(
+            json.dumps(
+                {
+                    "status": "metrics_failed",
+                    "error": sanitize_error(error),
+                },
+                indent=2,
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+
+    finally:
+        if store is not None:
+            store.close()
+
+
+@app.command("serve-metrics")
+def serve_metrics(
+    host: Annotated[
+        str,
+        typer.Option(
+            "--host",
+            help="Address on which the metrics server listens.",
+        ),
+    ] = "127.0.0.1",
+    port: Annotated[
+        int,
+        typer.Option(
+            "--port",
+            min=1,
+            max=65535,
+            help="TCP port on which the metrics server listens.",
+        ),
+    ] = 9464,
+) -> None:
+    """Serve live Prometheus metrics over HTTP."""
+
+    settings = Settings()
+    configure_logging(settings.log_level)
+
+    store: PgVectorStore | None = None
+
+    try:
+        store = make_store(settings)
+        typer.echo(
+            f"Serving Prometheus metrics at http://{host}:{port}/metrics",
+        )
+        serve_prometheus_metrics(
+            store.operational_metrics,
+            host,
+            port,
+        )
+
+    except KeyboardInterrupt:
+        typer.echo("Metrics server stopped.", err=True)
+
+    except SchemaNotReadyError as error:
+        print_schema_error(error)
+        raise typer.Exit(code=2) from None
+
+    except Exception as error:
+        typer.echo(
+            json.dumps(
+                {
+                    "status": "metrics_server_failed",
                     "error": sanitize_error(error),
                 },
                 indent=2,

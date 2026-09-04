@@ -14,6 +14,7 @@ from ragpipe.models import (
     EMPTY_METADATA_HASH,
     Chunk,
     DocumentState,
+    OperationalMetricsSnapshot,
     SearchResult,
     StoreStatus,
     SyncResult,
@@ -444,6 +445,88 @@ class PgVectorStore(Store):
             )
             for row in rows
         ]
+
+    def operational_metrics(
+        self,
+    ) -> OperationalMetricsSnapshot:
+        """Return corpus gauges and all-time persisted run totals."""
+
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH latest_run AS (
+                    SELECT
+                        status,
+                        finished_at,
+                        GREATEST(
+                            0,
+                            EXTRACT(
+                                EPOCH FROM finished_at - started_at
+                            ) * 1000
+                        ) AS duration_ms
+                    FROM sync_runs
+                    ORDER BY finished_at DESC, id DESC
+                    LIMIT 1
+                )
+                SELECT
+                    (SELECT count(*) FROM documents),
+                    (SELECT count(*) FROM chunks),
+                    count(*) FILTER (
+                        WHERE status = 'running'
+                    ),
+                    count(*) FILTER (
+                        WHERE status = 'succeeded'
+                    ),
+                    count(*) FILTER (
+                        WHERE status = 'failed'
+                    ),
+                    COALESCE(sum(new_documents), 0),
+                    COALESCE(sum(changed_documents), 0),
+                    COALESCE(
+                        sum(metadata_changed_documents),
+                        0
+                    ),
+                    COALESCE(sum(deleted_documents), 0),
+                    COALESCE(sum(unchanged_documents), 0),
+                    COALESCE(sum(embedded_chunks), 0),
+                    COALESCE(sum(deleted_chunks), 0),
+                    COALESCE(sum(scanned_documents), 0),
+                    COALESCE(sum(scanned_bytes), 0),
+                    COALESCE(sum(embedding_batches), 0),
+                    COALESCE(sum(embedding_duration_ms), 0),
+                    (SELECT status FROM latest_run),
+                    (SELECT finished_at FROM latest_run),
+                    (SELECT duration_ms FROM latest_run)
+                FROM sync_runs
+                """
+            )
+
+            row = cur.fetchone()
+
+        if row is None:
+            raise RuntimeError("Could not read operational metrics")
+
+        return OperationalMetricsSnapshot(
+            documents=int(row[0]),
+            chunks=int(row[1]),
+            sync_runs_running=int(row[2]),
+            sync_runs_succeeded=int(row[3]),
+            sync_runs_failed=int(row[4]),
+            new_documents_total=int(row[5]),
+            changed_documents_total=int(row[6]),
+            metadata_changed_documents_total=int(row[7]),
+            deleted_documents_total=int(row[8]),
+            unchanged_documents_total=int(row[9]),
+            embedded_chunks_total=int(row[10]),
+            deleted_chunks_total=int(row[11]),
+            scanned_documents_total=int(row[12]),
+            scanned_bytes_total=int(row[13]),
+            embedding_batches_total=int(row[14]),
+            embedding_duration_ms_total=float(row[15]),
+            last_sync_status=(None if row[16] is None else str(row[16])),
+            last_sync_at=row[17],
+            last_sync_duration_ms=(None if row[18] is None else float(row[18])),
+        )
 
     def search(
         self,

@@ -22,7 +22,7 @@
 - Persisted, bounded, credential-sanitized failed-run information
 - Idempotent no-op synchronization for unchanged files
 - PostgreSQL advisory locking that rejects overlapping synchronization runs
-- `ragpipe sync`, `ragpipe search`, `ragpipe evaluate`, `ragpipe runs`, and `ragpipe status` commands
+- `ragpipe sync`, `ragpipe search`, `ragpipe evaluate`, `ragpipe runs`, `ragpipe metrics`, `ragpipe serve-metrics`, and `ragpipe status` commands
 - Cosine-similarity retrieval with embedding-model and JSONB metadata filtering
 - Deterministic result ordering for equal similarity scores
 - PostgreSQL HNSW cosine index for vector search
@@ -30,6 +30,7 @@
 - JSONL retrieval evaluation with Hit Rate@K, MRR@K, and per-query ranks
 - Structured JSON logs, persisted synchronization statistics, source-volume metrics, and embedding timings
 - Recent operational run history with successful and sanitized failed-run details
+- Prometheus text export and a lightweight HTTP `/metrics` endpoint backed by persisted database aggregates
 - Unit and pgvector integration tests covering synchronization, metadata, rollback, locking, migrations, search, and evaluation
 - Docker Compose, package metadata, linting, type checking, coverage enforcement, builds, and GitHub Actions CI
 
@@ -50,6 +51,8 @@ flowchart TD
     Q[Search or evaluation query] --> E[Query embedding and filters]
     E --> D
     D --> R[Ranked matching chunks]
+    D --> M[Operational metrics snapshot]
+    M --> X[CLI output or HTTP metrics]
 ```
 
 `SyncPipeline` depends on the `DocumentSource` protocol instead of directly depending on a filesystem path or cloud SDK. A source supplies a stable label, scans its current documents, and loads document text when required. `LocalFolderSource` and `S3DocumentSource` reuse the same diff, chunking, embedding, transaction, and observability logic.
@@ -96,6 +99,7 @@ ragpipe evaluate \
   --dataset evaluation/sample.jsonl \
   --k 5
 ragpipe runs --limit 10
+ragpipe metrics
 ```
 
 The second unchanged synchronization should report:
@@ -380,12 +384,74 @@ Rows created before migration `0005_operational_metrics` are retained and backfi
 
 The local embedding provider does not incur API charges, so Ragpipe does not invent a cost metric. A future billable provider can add token and provider-reported cost usage without changing the meaning of the current timing counters.
 
+## Prometheus metrics
+
+Print one Prometheus snapshot directly to standard output:
+
+```bash
+ragpipe metrics
+```
+
+Start the HTTP exporter on its default loopback address and port:
+
+```bash
+ragpipe serve-metrics
+```
+
+The equivalent explicit command is:
+
+```bash
+ragpipe serve-metrics \
+  --host 127.0.0.1 \
+  --port 9464
+```
+
+Scrape the endpoint from another terminal:
+
+```bash
+curl http://127.0.0.1:9464/metrics
+```
+
+The server returns Prometheus text exposition format at `GET /metrics`. Other paths and non-GET requests return `404`. Press `Ctrl+C` to stop the server cleanly.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `ragpipe_documents` | Gauge | Documents currently stored |
+| `ragpipe_chunks` | Gauge | Chunks currently stored |
+| `ragpipe_sync_runs_total{status}` | Counter | Persisted runs grouped by `running`, `succeeded`, or `failed` |
+| `ragpipe_document_changes_total{change}` | Counter | New, content-changed, metadata-changed, deleted, and unchanged documents across runs |
+| `ragpipe_embedded_chunks_total` | Counter | Chunks committed with embeddings across runs |
+| `ragpipe_deleted_chunks_total` | Counter | Chunks deleted by successful synchronizations |
+| `ragpipe_scanned_documents_total` | Counter | Documents scanned across persisted runs |
+| `ragpipe_scanned_bytes_total` | Counter | Document bytes scanned across persisted runs |
+| `ragpipe_embedding_batches_total` | Counter | Embedding calls attempted across runs |
+| `ragpipe_embedding_duration_seconds_total` | Counter | Cumulative time spent in attempted embedding calls |
+| `ragpipe_last_sync_status{status}` | Gauge | One-hot status of the latest run |
+| `ragpipe_last_sync_timestamp_seconds` | Gauge | Unix timestamp of the latest completed run |
+| `ragpipe_last_sync_duration_seconds` | Gauge | Duration of the latest run |
+
+Totals are calculated from `sync_runs`, so they survive process restarts and do not depend on one long-running Python process. Corpus gauges are calculated from the current `documents` and `chunks` tables. The exporter intentionally avoids `source` and `run_id` labels because their continuously growing values would create high-cardinality Prometheus time series.
+
+Rows created before migration `0005_operational_metrics` contribute zero to fields that were unavailable historically. Failed runs may contribute attempted embedding batches and duration, while committed embedded/deleted chunk counters remain zero after rollback.
+
+Example Prometheus configuration when Prometheus runs on the same host:
+
+```yaml
+scrape_configs:
+  - job_name: ragpipe
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["127.0.0.1:9464"]
+```
+
+The exporter binds to `127.0.0.1` by default and has no authentication. Keep that default for local monitoring. If remote Prometheus access is required, bind deliberately, restrict network access, and place authentication and TLS at a trusted reverse proxy. Each scrape performs a read-only database aggregate query, so choose a sensible scrape interval.
+
 ## CLI exit codes
 
 | Code | Meaning |
 | ---: | --- |
 | `0` | Command completed successfully |
-| `1` | Synchronization, search, or evaluation failed |
+| `1` | Synchronization, search, evaluation, metrics collection, or metrics serving failed |
 | `2` | Schema is missing/outdated/incompatible, or command-line input is invalid |
 | `3` | Another synchronization owns the database sync lock |
 | `4` | Evaluation dataset content is invalid |
@@ -420,6 +486,7 @@ The test suite includes:
 - Migration upgrade/downgrade and schema-revision validation
 - HNSW and metadata GIN index verification
 - Operational-metrics persistence, run ordering, limits, and failed-run semantics
+- Database-backed operational aggregation, Prometheus rendering, HTTP responses, CLI output, and exporter cleanup
 - Cosine ranking, model filtering, limits, and deterministic ordering
 - JSONB object and array metadata containment filters
 - Strict metadata manifest and CLI filter validation
@@ -441,7 +508,7 @@ Implement `EmbeddingProvider` to add another local model or an API provider such
 
 Implement `DocumentSource` to add another document system. A source must provide a stable label, return documents keyed by stable source-relative paths, and load extracted document text. `SyncPipeline` can then apply the existing change detection, metadata handling, chunking, embedding, transactional storage, and operational metrics without knowing where the documents originated.
 
-`LocalFolderSource` and `S3DocumentSource` are currently available. Future releases can add other object stores, authenticated access-control enforcement, multi-source tenancy, evaluation-result persistence, provider-reported embedding cost, and Prometheus/OpenTelemetry export.
+`LocalFolderSource` and `S3DocumentSource` are currently available. Future releases can add other object stores, authenticated access-control enforcement, multi-source tenancy, evaluation-result persistence, provider-reported embedding cost, and OpenTelemetry export.
 
 ## Operational limitations
 
@@ -458,7 +525,8 @@ Implement `DocumentSource` to add another document system. A source must provide
 - Search returns stored chunk content directly; do not expose it to untrusted callers without an authorization layer.
 - Evaluation reports are printed as JSON and are not persisted.
 - Evaluation cases do not currently accept metadata filters.
-- Operational metrics are persisted and available as JSON but are not yet exported in Prometheus or OpenTelemetry format.
+- Prometheus metrics are served by a lightweight single-process WSGI endpoint; authentication, TLS, service supervision, and Prometheus deployment are external responsibilities.
+- OpenTelemetry export is not yet implemented.
 - Changing the embedding model does not automatically re-embed unchanged documents.
 
 ## License
