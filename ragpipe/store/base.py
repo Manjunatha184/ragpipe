@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
+from typing import Any
 
 from ragpipe.models import (
+    EMPTY_METADATA_HASH,
     Chunk,
     DocumentState,
     SearchResult,
@@ -43,7 +45,17 @@ class Store(ABC):
         chunks: Sequence[Chunk],
         embeddings: Sequence[Sequence[float]],
         model_name: str,
+        document_metadata: Mapping[str, Any] | None = None,
+        metadata_hash: str = EMPTY_METADATA_HASH,
     ) -> int: ...
+
+    @abstractmethod
+    def update_document_metadata(
+        self,
+        document_id: str,
+        document_metadata: Mapping[str, Any],
+        metadata_hash: str,
+    ) -> None: ...
 
     @abstractmethod
     def record_run(
@@ -59,6 +71,7 @@ class Store(ABC):
         query_embedding: Sequence[float],
         model_name: str,
         limit: int,
+        metadata_filter: Mapping[str, Any] | None = None,
     ) -> list[SearchResult]: ...
 
     @abstractmethod

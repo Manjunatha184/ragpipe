@@ -148,3 +148,62 @@ def test_lock_contention_does_not_start_or_record_sync(
     assert store.runs == []
     assert store.write_count == 0
     assert embedder.calls == 0
+
+
+def test_metadata_only_change_updates_metadata_without_reembedding(
+    tmp_path: Path,
+) -> None:
+    document = tmp_path / "policy.md"
+    document.write_text(
+        "Employees receive annual leave.",
+        encoding="utf-8",
+    )
+
+    pipeline, store, embedder = make_pipeline()
+    pipeline.sync(tmp_path)
+
+    original_state = store.documents["policy.md"]
+    original_chunk_count = store.status().chunks
+    original_embedding_calls = embedder.calls
+    original_embedded_texts = embedder.texts
+    original_write_count = store.write_count
+
+    (tmp_path / ".ragpipe-metadata.json").write_text(
+        """
+        {
+          "policy.md": {
+            "department": "hr",
+            "tags": ["leave", "policy"]
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    result = pipeline.sync(tmp_path)
+
+    updated_state = store.documents["policy.md"]
+
+    assert result.new_documents == 0
+    assert result.changed_documents == 0
+    assert result.metadata_changed_documents == 1
+    assert result.deleted_documents == 0
+    assert result.unchanged_documents == 0
+    assert result.embedded_chunks == 0
+    assert result.deleted_chunks == 0
+
+    # Updating metadata must not replace the document or its chunks.
+    assert updated_state.id == original_state.id
+    assert updated_state.content_hash == original_state.content_hash
+    assert updated_state.metadata_hash != original_state.metadata_hash
+    assert store.status().chunks == original_chunk_count
+
+    # No embedding work should happen for a metadata-only change.
+    assert embedder.calls == original_embedding_calls
+    assert embedder.texts == original_embedded_texts
+
+    assert store.document_metadata["policy.md"] == {
+        "department": "hr",
+        "tags": ["leave", "policy"],
+    }
+    assert store.write_count == original_write_count + 1

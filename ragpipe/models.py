@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+EMPTY_METADATA_HASH = hashlib.sha256(b"{}").hexdigest()
+
 
 class ChangeType(StrEnum):
     NEW = "new"
     CHANGED = "changed"
+    METADATA_CHANGED = "metadata_changed"
     DELETED = "deleted"
     UNCHANGED = "unchanged"
 
@@ -21,6 +25,8 @@ class ScannedDocument:
     content_hash: str
     size_bytes: int
     media_type: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata_hash: str = EMPTY_METADATA_HASH
 
 
 @dataclass(frozen=True)
@@ -28,6 +34,7 @@ class DocumentState:
     id: str
     path: str
     content_hash: str
+    metadata_hash: str = EMPTY_METADATA_HASH
 
 
 @dataclass(frozen=True)
@@ -36,6 +43,7 @@ class SourceDiff:
     changed: tuple[ScannedDocument, ...] = ()
     deleted: tuple[DocumentState, ...] = ()
     unchanged: tuple[ScannedDocument, ...] = ()
+    metadata_changed: tuple[ScannedDocument, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -68,6 +76,7 @@ class SyncResult:
     deleted_chunks: int
     started_at: datetime
     finished_at: datetime
+    metadata_changed_documents: int = 0
 
 
 @dataclass(frozen=True)
