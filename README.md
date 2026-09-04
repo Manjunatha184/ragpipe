@@ -2,7 +2,7 @@
 
 <!-- Documentation includes schema revisions through 0005. -->
 
-`ragpipe` is the data pipeline underneath a retrieval-augmented generation (RAG) system. It keeps PostgreSQL and pgvector synchronized with a changing folder of PDF, Markdown, and text documents. It detects additions, content changes, metadata changes, and deletions using deterministic SHA-256 hashes, then embeds only the chunks that actually need new vectors.
+`ragpipe` is the data pipeline underneath a retrieval-augmented generation (RAG) system. It keeps PostgreSQL and pgvector synchronized with changing PDF, Markdown, and text documents from a local folder or Amazon S3. It detects additions, content changes, metadata changes, and deletions using deterministic SHA-256 hashes, then embeds only the chunks that actually need new vectors.
 
 > Everyone builds the chatbot on top. This project builds the pipeline underneath—the part that must stay correct when a document changes, disappears, or thousands arrive overnight.
 
@@ -11,6 +11,7 @@
 - Recursive local-folder discovery for `.pdf`, `.md`, `.markdown`, and `.txt`; document symlinks are ignored
 - A `DocumentSource` protocol that separates synchronization from source-specific scanning and loading
 - A tested `LocalFolderSource` implementation with source-root path protection
+- A paginated `S3DocumentSource` implementation with strict URI parsing and object consistency checks
 - SHA-256 content and metadata change detection instead of unreliable modification timestamps
 - Optional per-document metadata through `.ragpipe-metadata.json`
 - Metadata-only updates without deleting chunks or regenerating embeddings
@@ -38,8 +39,10 @@ Chat/answer generation, a web UI, authentication, authorization, and multi-tenan
 
 ```mermaid
 flowchart TD
-    L[Local folder and metadata manifest] --> S[LocalFolderSource]
-    S --> P[DocumentSource protocol]
+    L[Local folder] --> LS[LocalFolderSource]
+    O[S3 bucket and prefix] --> SS[S3DocumentSource]
+    LS --> P[DocumentSource protocol]
+    SS --> P
     P --> B[Scanner and deterministic diff]
     B -->|new or content changed| C[Load, chunk, and embed]
     C --> D[(PostgreSQL and pgvector)]
@@ -49,7 +52,7 @@ flowchart TD
     D --> R[Ranked matching chunks]
 ```
 
-`SyncPipeline` depends on the `DocumentSource` protocol instead of directly depending on a filesystem path. A source supplies a stable label, scans its current documents, and loads document text when required. `LocalFolderSource` provides the current filesystem implementation. This boundary allows future object-store sources to reuse the same diff, chunking, embedding, transaction, and observability logic.
+`SyncPipeline` depends on the `DocumentSource` protocol instead of directly depending on a filesystem path or cloud SDK. A source supplies a stable label, scans its current documents, and loads document text when required. `LocalFolderSource` and `S3DocumentSource` reuse the same diff, chunking, embedding, transaction, and observability logic.
 
 The scanner compares the current source with the document state stored in PostgreSQL. The synchronization pipeline then applies the calculated changes inside one database transaction.
 
@@ -109,6 +112,43 @@ To demonstrate content updates, edit `sample_docs/welcome.md` and synchronize ag
 
 The local embedding model is downloaded on first use and then loaded from the local Hugging Face cache. An optional `HF_TOKEN` environment variable enables authenticated downloads and higher rate limits. Never commit that token.
 
+## Amazon S3 source
+
+Install the optional S3 dependency together with the local embedding and development dependencies:
+
+```bash
+pip install -e '.[local,s3,dev]'
+```
+
+Synchronize a complete bucket or one prefix:
+
+```bash
+ragpipe sync --source s3://my-document-bucket
+
+ragpipe sync \
+  --source s3://my-document-bucket/knowledge-base
+```
+
+S3 credentials are resolved through the standard AWS SDK credential chain, including environment variables, shared AWS profiles, container credentials, and instance or workload roles. Do not place access keys in the source URI or commit credentials to the repository. You can verify the active identity separately when the AWS CLI is installed:
+
+```bash
+aws sts get-caller-identity
+```
+
+The principal used by Ragpipe requires `s3:ListBucket` for the selected bucket and `s3:GetObject` for objects under the selected prefix. Production policies should restrict both resources and prefixes to the smallest required scope.
+
+For each synchronization, the S3 implementation:
+
+- Uses the `ListObjectsV2` paginator so corpora larger than one response page are discovered completely.
+- Ignores directory markers and unsupported file extensions.
+- Treats object keys relative to the selected prefix as stable document paths.
+- Loads `.ragpipe-metadata.json` from the root of the selected bucket or prefix when present.
+- Reads every supported object and calculates its exact SHA-256 content hash.
+- Uses the listed ETag as an `If-Match` condition when reading an object.
+- Verifies the SHA-256 hash again when loading changed content, failing safely if an object changed after scanning.
+
+An S3 error is handled through the same synchronization failure path as a local scanning or loading error. Corpus changes are rolled back, and the failed run is recorded with a bounded, sanitized error message.
+
 ## Configuration
 
 All Ragpipe settings use the `RAGPIPE_` prefix and can be placed in `.env`.
@@ -129,7 +169,7 @@ For production, use a secret manager for database credentials, restrict network 
 
 ## Document metadata
 
-Place an optional `.ragpipe-metadata.json` file at the root of the synchronized source directory. Its keys are document paths relative to that root, and every value must be a JSON object.
+Place an optional `.ragpipe-metadata.json` file at the root of the selected local directory or S3 prefix. Its keys are document paths relative to that root or prefix, and every value must be a JSON object.
 
 ```json
 {
@@ -150,7 +190,8 @@ The manifest itself is configuration and is not ingested as a document.
 
 Manifest validation is intentionally strict:
 
-- The manifest must be a regular, non-symlink file no larger than 1 MiB.
+- The manifest must not exceed 1 MiB.
+- For local sources, the manifest must be a regular, non-symlink file.
 - Its root value must be a JSON object.
 - Every key must be a safe POSIX-style relative path.
 - Absolute paths, parent traversal such as `../`, and unsupported paths are rejected.
@@ -370,6 +411,7 @@ python -m build
 The test suite includes:
 
 - `DocumentSource` integration, local-folder loading, and source-root path traversal protection
+- S3 URI validation, pagination, filtering, metadata, exact hashing, consistency checks, and idempotency
 - New, changed, metadata-changed, deleted, and unchanged detection
 - Idempotent synchronization and metadata-only updates without re-embedding
 - Changed-document replacement and deleted-document cleanup
@@ -399,15 +441,16 @@ Implement `EmbeddingProvider` to add another local model or an API provider such
 
 Implement `DocumentSource` to add another document system. A source must provide a stable label, return documents keyed by stable source-relative paths, and load extracted document text. `SyncPipeline` can then apply the existing change detection, metadata handling, chunking, embedding, transactional storage, and operational metrics without knowing where the documents originated.
 
-`LocalFolderSource` is the currently available implementation. Future releases can add an S3 source, authenticated access-control enforcement, multi-source tenancy, evaluation-result persistence, provider-reported embedding cost, and Prometheus/OpenTelemetry export.
+`LocalFolderSource` and `S3DocumentSource` are currently available. Future releases can add other object stores, authenticated access-control enforcement, multi-source tenancy, evaluation-result persistence, provider-reported embedding cost, and Prometheus/OpenTelemetry export.
 
 ## Operational limitations
 
 - The current version owns one database corpus and accepts one source per synchronization; multi-source tenancy is not implemented.
-- `LocalFolderSource` is currently the only production source implementation; cloud object-store sources are not yet included.
+- Each synchronization treats its selected local root or S3 prefix as the complete corpus. Changing source locations against the same database can therefore add, replace, or delete existing documents.
+- S3 scanning downloads every supported object to calculate an exact SHA-256 hash. New or changed objects are downloaded again for extraction. This favors correctness and bounded memory over minimum S3 request and transfer cost.
 - Alembic migrations must be applied before running a newer application version.
 - Empty documents are tracked but create no chunks.
-- Scanned paths are relative to the source root; moving a file is modeled as deletion plus addition.
+- Scanned paths are relative to the local root or S3 prefix; moving a file or object is modeled as deletion plus addition.
 - A manifest entry must refer to an existing supported document; remove stale entries when deleting documents.
 - Synchronizations are serialized through a database advisory lock; rejected attempts must be retried.
 - HNSW search is approximate and optimized for scalable nearest-neighbor retrieval.
