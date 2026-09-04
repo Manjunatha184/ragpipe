@@ -1,0 +1,2 @@
+{"query": "What does the demo document demonstrate?", "expected_document": "welcome.md"}
+{"query": "What should happen after editing a document?", "expected_document": "welcome.md"}

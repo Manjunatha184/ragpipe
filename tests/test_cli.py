@@ -331,3 +331,139 @@ def test_search_rejects_blank_query() -> None:
 
     assert result.exit_code == 2
     assert "Query must not be empty" in result.output
+
+
+def test_evaluate_returns_metrics_and_closes_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = tmp_path / "evaluation.jsonl"
+    dataset.write_text(
+        '{"query": "What is Ragpipe?", "expected_document": "guide.md"}\n',
+        encoding="utf-8",
+    )
+
+    store = SearchStore()
+
+    monkeypatch.setattr(
+        cli,
+        "make_store",
+        lambda settings: store,
+    )
+    monkeypatch.setattr(
+        cli,
+        "LocalSentenceTransformerProvider",
+        FakeSearchEmbedder,
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "evaluate",
+            "--dataset",
+            str(dataset),
+            "--k",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0
+
+    payload = json.loads(result.stdout)
+
+    assert payload["dataset"] == str(dataset.resolve())
+    assert payload["k"] == 3
+    assert payload["total_cases"] == 1
+    assert payload["hits"] == 1
+    assert payload["hit_rate_at_k"] == 1.0
+    assert payload["mean_reciprocal_rank_at_k"] == 1.0
+    assert payload["cases"] == [
+        {
+            "query": "What is Ragpipe?",
+            "expected_document": "guide.md",
+            "retrieved_documents": ["guide.md"],
+            "rank": 1,
+            "reciprocal_rank": 1.0,
+            "hit": True,
+        }
+    ]
+    assert store.closed is True
+
+
+def test_evaluate_rejects_invalid_dataset_before_opening_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = tmp_path / "invalid.jsonl"
+    dataset.write_text(
+        "not-json\n",
+        encoding="utf-8",
+    )
+
+    def unexpected_store_creation(settings: Settings) -> ClosingStore:
+        raise AssertionError("Store must not be created for invalid data")
+
+    monkeypatch.setattr(
+        cli,
+        "make_store",
+        unexpected_store_creation,
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "evaluate",
+            "--dataset",
+            str(dataset),
+        ],
+    )
+
+    assert result.exit_code == 4
+
+    payload = json.loads(result.stderr)
+
+    assert payload["status"] == "invalid_dataset"
+    assert "line 1 is not valid JSON" in payload["error"]
+
+
+def test_evaluate_failure_returns_structured_error_and_closes_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = tmp_path / "evaluation.jsonl"
+    dataset.write_text(
+        '{"query": "What is Ragpipe?", "expected_document": "guide.md"}\n',
+        encoding="utf-8",
+    )
+
+    store = SearchStore()
+
+    monkeypatch.setattr(
+        cli,
+        "make_store",
+        lambda settings: store,
+    )
+    monkeypatch.setattr(
+        cli,
+        "LocalSentenceTransformerProvider",
+        FailingSearchEmbedder,
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "evaluate",
+            "--dataset",
+            str(dataset),
+        ],
+    )
+
+    assert result.exit_code == 1
+
+    payload = json.loads(result.stderr)
+
+    assert payload == {
+        "status": "evaluation_failed",
+        "error": "RuntimeError: Query embedding failed",
+    }
+    assert store.closed is True

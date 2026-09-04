@@ -12,6 +12,11 @@ from ragpipe.config import Settings
 from ragpipe.embedding.local_provider import (
     LocalSentenceTransformerProvider,
 )
+from ragpipe.evaluation import (
+    EvaluationDatasetError,
+    RetrievalEvaluator,
+    load_evaluation_cases,
+)
 from ragpipe.logging import configure_logging
 from ragpipe.pipeline import (
     SyncAlreadyRunningError,
@@ -211,6 +216,101 @@ def search(
             json.dumps(
                 {
                     "status": "search_failed",
+                    "error": sanitize_error(error),
+                },
+                indent=2,
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+
+    finally:
+        if store is not None:
+            store.close()
+
+
+@app.command()
+def evaluate(
+    dataset: Annotated[
+        Path,
+        typer.Option(
+            "--dataset",
+            "-d",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="JSONL file containing retrieval evaluation cases.",
+        ),
+    ],
+    k: Annotated[
+        int,
+        typer.Option(
+            "--k",
+            min=1,
+            max=100,
+            help="Number of retrieved chunks evaluated per query.",
+        ),
+    ] = 5,
+) -> None:
+    settings = Settings()
+    configure_logging(settings.log_level)
+
+    store: PgVectorStore | None = None
+
+    try:
+        cases = load_evaluation_cases(dataset)
+
+        embedder = LocalSentenceTransformerProvider(
+            model_name=settings.embedding_model,
+            expected_dimension=settings.embedding_dimension,
+        )
+
+        store = make_store(settings)
+
+        report = RetrievalEvaluator(
+            store=store,
+            embedder=embedder,
+            batch_size=settings.batch_size,
+        ).evaluate(
+            cases=cases,
+            k=k,
+        )
+
+        typer.echo(
+            json.dumps(
+                {
+                    "dataset": str(dataset.expanduser().resolve()),
+                    "embedding_model": embedder.model_name,
+                    **asdict(report),
+                },
+                default=str,
+                indent=2,
+            )
+        )
+
+    except EvaluationDatasetError as error:
+        typer.echo(
+            json.dumps(
+                {
+                    "status": "invalid_dataset",
+                    "error": str(error),
+                },
+                indent=2,
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=4) from None
+
+    except SchemaNotReadyError as error:
+        print_schema_error(error)
+        raise typer.Exit(code=2) from None
+
+    except Exception as error:
+        typer.echo(
+            json.dumps(
+                {
+                    "status": "evaluation_failed",
                     "error": sanitize_error(error),
                 },
                 indent=2,
