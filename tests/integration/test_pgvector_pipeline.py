@@ -10,6 +10,7 @@ from alembic.config import Config
 
 from alembic import command
 from ragpipe.chunking.chunker import RecursiveCharacterChunker
+from ragpipe.models import Chunk
 from ragpipe.pipeline import SyncFailedError, SyncPipeline
 from ragpipe.store.base import SyncLockUnavailableError
 from ragpipe.store.pgvector_store import PgVectorStore
@@ -97,6 +98,43 @@ def create_pipeline(
         ),
         embedder=embedder or PgVectorFakeEmbedder(),
         batch_size=16,
+    )
+
+
+def make_search_vector(
+    first: float,
+    second: float,
+) -> list[float]:
+    return [
+        first,
+        second,
+        *([0.0] * 382),
+    ]
+
+
+def insert_search_document(
+    store: PgVectorStore,
+    path: str,
+    content: str,
+    embedding: Sequence[float],
+    model_name: str = "search-test-model",
+    metadata: dict[str, str] | None = None,
+) -> None:
+    chunk = Chunk(
+        index=0,
+        text=content,
+        content_hash="c" * 64,
+        metadata=metadata or {},
+    )
+
+    store.replace_document(
+        path=path,
+        content_hash="d" * 64,
+        media_type="text/plain",
+        size_bytes=len(content.encode("utf-8")),
+        chunks=[chunk],
+        embeddings=[embedding],
+        model_name=model_name,
     )
 
 
@@ -241,3 +279,136 @@ def test_sync_lock_rejects_concurrent_holder(
             pass
     finally:
         contender.close()
+
+
+def test_vector_search_ranks_nearest_chunk_and_returns_metadata(
+    pgvector_store: PgVectorStore,
+) -> None:
+    with pgvector_store.transaction():
+        insert_search_document(
+            pgvector_store,
+            path="nearest.txt",
+            content="Nearest content",
+            embedding=make_search_vector(1.0, 0.0),
+            metadata={"topic": "nearest"},
+        )
+        insert_search_document(
+            pgvector_store,
+            path="distant.txt",
+            content="Distant content",
+            embedding=make_search_vector(0.0, 1.0),
+            metadata={"topic": "distant"},
+        )
+
+    results = pgvector_store.search(
+        query_embedding=make_search_vector(1.0, 0.0),
+        model_name="search-test-model",
+        limit=5,
+    )
+
+    assert [result.document_path for result in results] == [
+        "nearest.txt",
+        "distant.txt",
+    ]
+    assert results[0].chunk_index == 0
+    assert results[0].content == "Nearest content"
+    assert results[0].metadata == {"topic": "nearest"}
+    assert results[0].embedding_model == "search-test-model"
+    assert results[0].score == pytest.approx(1.0)
+    assert results[1].score == pytest.approx(0.0)
+
+
+def test_vector_search_filters_embedding_model_and_applies_limit(
+    pgvector_store: PgVectorStore,
+) -> None:
+    with pgvector_store.transaction():
+        insert_search_document(
+            pgvector_store,
+            path="first.txt",
+            content="First compatible result",
+            embedding=make_search_vector(1.0, 0.0),
+        )
+        insert_search_document(
+            pgvector_store,
+            path="second.txt",
+            content="Second compatible result",
+            embedding=make_search_vector(0.8, 0.2),
+        )
+        insert_search_document(
+            pgvector_store,
+            path="incompatible.txt",
+            content="Different embedding model",
+            embedding=make_search_vector(1.0, 0.0),
+            model_name="different-model",
+        )
+
+    results = pgvector_store.search(
+        query_embedding=make_search_vector(1.0, 0.0),
+        model_name="search-test-model",
+        limit=1,
+    )
+
+    assert len(results) == 1
+    assert results[0].document_path == "first.txt"
+    assert results[0].embedding_model == "search-test-model"
+
+
+def test_vector_search_returns_empty_list_for_empty_store(
+    pgvector_store: PgVectorStore,
+) -> None:
+    results = pgvector_store.search(
+        query_embedding=make_search_vector(1.0, 0.0),
+        model_name="search-test-model",
+        limit=5,
+    )
+
+    assert results == []
+
+
+def test_vector_search_rejects_invalid_inputs(
+    pgvector_store: PgVectorStore,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="limit must be greater than zero",
+    ):
+        pgvector_store.search(
+            query_embedding=make_search_vector(1.0, 0.0),
+            model_name="search-test-model",
+            limit=0,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="must not be empty",
+    ):
+        pgvector_store.search(
+            query_embedding=[],
+            model_name="search-test-model",
+            limit=5,
+        )
+
+
+def test_vector_search_hnsw_index_exists(
+    pgvector_store: PgVectorStore,
+) -> None:
+    if TEST_DATABASE_URL is None:
+        pytest.skip("RAGPIPE_TEST_DATABASE_URL is not configured")
+
+    with psycopg.connect(TEST_DATABASE_URL) as connection:
+        row = connection.execute(
+            """
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'chunks'
+              AND indexname = 'chunks_embedding_hnsw_idx'
+            """
+        ).fetchone()
+
+    assert row is not None
+
+    index_definition = str(row[0]).lower()
+
+    assert "using hnsw" in index_definition
+    assert "vector_cosine_ops" in index_definition
