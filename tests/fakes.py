@@ -6,7 +6,13 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
 from ragpipe.embedding.base import EmbeddingProvider
-from ragpipe.models import Chunk, DocumentState, StoreStatus, SyncResult
+from ragpipe.models import (
+    Chunk,
+    DocumentState,
+    SearchResult,
+    StoreStatus,
+    SyncResult,
+)
 from ragpipe.store.base import Store, SyncLockUnavailableError
 
 
@@ -83,6 +89,17 @@ class MemoryStore(Store):
 
     def record_run(self, result: SyncResult, source: str, error: str | None = None) -> None:
         self.runs.append(result)
+
+    def search(
+        self,
+        query_embedding: Sequence[float],
+        model_name: str,
+        limit: int,
+    ) -> list[SearchResult]:
+        if limit <= 0:
+            raise ValueError("Search limit must be greater than zero")
+
+        return []
 
     def status(self) -> StoreStatus:
         return StoreStatus(

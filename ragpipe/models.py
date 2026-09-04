@@ -47,6 +47,16 @@ class Chunk:
 
 
 @dataclass(frozen=True)
+class SearchResult:
+    document_path: str
+    chunk_index: int
+    content: str
+    metadata: dict[str, Any]
+    embedding_model: str
+    score: float
+
+
+@dataclass(frozen=True)
 class SyncResult:
     run_id: str
     status: str

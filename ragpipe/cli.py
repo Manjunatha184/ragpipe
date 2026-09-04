@@ -17,6 +17,7 @@ from ragpipe.pipeline import (
     SyncAlreadyRunningError,
     SyncFailedError,
     SyncPipeline,
+    sanitize_error,
 )
 from ragpipe.store.pgvector_store import (
     PgVectorStore,
@@ -129,6 +130,94 @@ def sync(
     except SchemaNotReadyError as error:
         print_schema_error(error)
         raise typer.Exit(code=2) from None
+
+    finally:
+        if store is not None:
+            store.close()
+
+
+@app.command()
+def search(
+    query: Annotated[
+        str,
+        typer.Option(
+            "--query",
+            "-q",
+            help="Natural-language query to search for.",
+        ),
+    ],
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            "-n",
+            min=1,
+            max=100,
+            help="Maximum number of matching chunks.",
+        ),
+    ] = 5,
+) -> None:
+    query_text = query.strip()
+
+    if not query_text:
+        raise typer.BadParameter(
+            "Query must not be empty.",
+            param_hint="--query",
+        )
+
+    settings = Settings()
+    configure_logging(settings.log_level)
+
+    store: PgVectorStore | None = None
+
+    try:
+        embedder = LocalSentenceTransformerProvider(
+            model_name=settings.embedding_model,
+            expected_dimension=settings.embedding_dimension,
+        )
+
+        store = make_store(settings)
+
+        query_embeddings = embedder.embed([query_text])
+
+        if len(query_embeddings) != 1:
+            raise RuntimeError("Embedding provider did not return exactly one query vector")
+
+        results = store.search(
+            query_embedding=query_embeddings[0],
+            model_name=embedder.model_name,
+            limit=limit,
+        )
+
+        typer.echo(
+            json.dumps(
+                {
+                    "query": query_text,
+                    "embedding_model": embedder.model_name,
+                    "count": len(results),
+                    "results": [asdict(result) for result in results],
+                },
+                default=str,
+                indent=2,
+            )
+        )
+
+    except SchemaNotReadyError as error:
+        print_schema_error(error)
+        raise typer.Exit(code=2) from None
+
+    except Exception as error:
+        typer.echo(
+            json.dumps(
+                {
+                    "status": "search_failed",
+                    "error": sanitize_error(error),
+                },
+                indent=2,
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
 
     finally:
         if store is not None:

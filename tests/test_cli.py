@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 import ragpipe.cli as cli
 from ragpipe.config import Settings
+from ragpipe.models import SearchResult
 from ragpipe.pipeline import (
     SyncAlreadyRunningError,
     SyncFailedError,
@@ -43,6 +44,54 @@ class BusyPipeline:
 
     def sync(self, source: Path) -> None:
         raise SyncAlreadyRunningError()
+
+
+class SearchStore(ClosingStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.search_call: tuple[list[float], str, int] | None = None
+
+    def search(
+        self,
+        query_embedding: list[float],
+        model_name: str,
+        limit: int,
+    ) -> list[SearchResult]:
+        self.search_call = (
+            query_embedding,
+            model_name,
+            limit,
+        )
+
+        return [
+            SearchResult(
+                document_path="guide.md",
+                chunk_index=2,
+                content="Ragpipe keeps vectors synchronized.",
+                metadata={"section": "overview"},
+                embedding_model=model_name,
+                score=0.95,
+            )
+        ]
+
+
+class FakeSearchEmbedder:
+    def __init__(
+        self,
+        model_name: str,
+        expected_dimension: int,
+    ) -> None:
+        self.model_name = model_name
+        self.expected_dimension = expected_dimension
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        assert texts == ["What is Ragpipe?"]
+        return [[1.0, 0.0, 0.0]]
+
+
+class FailingSearchEmbedder(FakeSearchEmbedder):
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("Query embedding failed")
 
 
 def test_sync_failure_returns_structured_error_and_exit_one(
@@ -180,3 +229,105 @@ def test_make_store_closes_pool_when_validation_fails(
 
     assert len(created_stores) == 1
     assert created_stores[0].closed is True
+
+
+def test_search_returns_structured_results_and_closes_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SearchStore()
+
+    monkeypatch.setattr(
+        cli,
+        "make_store",
+        lambda settings: store,
+    )
+    monkeypatch.setattr(
+        cli,
+        "LocalSentenceTransformerProvider",
+        FakeSearchEmbedder,
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "search",
+            "--query",
+            "What is Ragpipe?",
+            "--limit",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0
+
+    payload = json.loads(result.stdout)
+
+    assert payload["query"] == "What is Ragpipe?"
+    assert payload["count"] == 1
+    assert payload["results"] == [
+        {
+            "document_path": "guide.md",
+            "chunk_index": 2,
+            "content": "Ragpipe keeps vectors synchronized.",
+            "metadata": {"section": "overview"},
+            "embedding_model": payload["embedding_model"],
+            "score": 0.95,
+        }
+    ]
+
+    assert store.search_call == (
+        [1.0, 0.0, 0.0],
+        payload["embedding_model"],
+        3,
+    )
+    assert store.closed is True
+
+
+def test_search_failure_returns_structured_error_and_closes_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SearchStore()
+
+    monkeypatch.setattr(
+        cli,
+        "make_store",
+        lambda settings: store,
+    )
+    monkeypatch.setattr(
+        cli,
+        "LocalSentenceTransformerProvider",
+        FailingSearchEmbedder,
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "search",
+            "--query",
+            "What is Ragpipe?",
+        ],
+    )
+
+    assert result.exit_code == 1
+
+    payload = json.loads(result.stderr)
+
+    assert payload == {
+        "status": "search_failed",
+        "error": "RuntimeError: Query embedding failed",
+    }
+    assert store.closed is True
+
+
+def test_search_rejects_blank_query() -> None:
+    result = runner.invoke(
+        cli.app,
+        [
+            "search",
+            "--query",
+            "   ",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Query must not be empty" in result.output

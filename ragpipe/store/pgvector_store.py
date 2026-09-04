@@ -10,10 +10,16 @@ from pgvector.psycopg import register_vector
 from psycopg import Connection
 from psycopg_pool import ConnectionPool
 
-from ragpipe.models import Chunk, DocumentState, StoreStatus, SyncResult
+from ragpipe.models import (
+    Chunk,
+    DocumentState,
+    SearchResult,
+    StoreStatus,
+    SyncResult,
+)
 from ragpipe.store.base import Store, SyncLockUnavailableError
 
-EXPECTED_SCHEMA_REVISION = "0001_initial_schema"
+EXPECTED_SCHEMA_REVISION = "0002_vector_search_index"
 SYNC_LOCK_NAME = "ragpipe:global-sync"
 
 
@@ -231,6 +237,71 @@ class PgVectorStore(Store):
                     error,
                 ),
             )
+
+    def search(
+        self,
+        query_embedding: Sequence[float],
+        model_name: str,
+        limit: int,
+    ) -> list[SearchResult]:
+        """Return the nearest compatible chunks using cosine similarity."""
+
+        if limit <= 0:
+            raise ValueError("Search limit must be greater than zero")
+
+        if not query_embedding:
+            raise ValueError("Query embedding must not be empty")
+
+        with self._pool.connection() as conn:
+            register_vector(conn)
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH query_vector AS (
+                        SELECT %s::vector AS embedding
+                    )
+                    SELECT
+                        documents.path,
+                        chunks.chunk_index,
+                        chunks.content,
+                        chunks.metadata,
+                        chunks.embedding_model,
+                        1 - (
+                            chunks.embedding
+                            <=> query_vector.embedding
+                        ) AS score
+                    FROM chunks
+                    JOIN documents
+                      ON documents.id = chunks.document_id
+                    CROSS JOIN query_vector
+                    WHERE chunks.embedding_model = %s
+                    ORDER BY
+                        chunks.embedding <=> query_vector.embedding,
+                        documents.path,
+                        chunks.chunk_index
+                    LIMIT %s
+                    """,
+                    (
+                        list(query_embedding),
+                        model_name,
+                        limit,
+                    ),
+                )
+
+                rows = cur.fetchall()
+
+        return [
+            SearchResult(
+                document_path=str(row[0]),
+                chunk_index=int(row[1]),
+                content=str(row[2]),
+                metadata=dict(row[3]),
+                embedding_model=str(row[4]),
+                score=float(row[5]),
+            )
+            for row in rows
+        ]
 
     def status(self) -> StoreStatus:
         with self._pool.connection() as conn, conn.cursor() as cur:
