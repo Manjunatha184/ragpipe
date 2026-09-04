@@ -14,6 +14,7 @@ from ragpipe.models import (
     SearchResult,
     StoreStatus,
     SyncResult,
+    SyncRunRecord,
 )
 from ragpipe.store.base import Store, SyncLockUnavailableError
 
@@ -46,6 +47,7 @@ class MemoryStore(Store):
         self.document_metadata: dict[str, dict[str, Any]] = {}
         self.chunk_counts: dict[str, int] = {}
         self.runs: list[SyncResult] = []
+        self.run_records: list[SyncRunRecord] = []
         self.write_count = 0
         self.sync_lock_available = True
 
@@ -68,6 +70,7 @@ class MemoryStore(Store):
                 self.chunk_counts,
                 self.runs,
                 self.write_count,
+                self.run_records,
             )
         )
 
@@ -80,6 +83,7 @@ class MemoryStore(Store):
                 self.chunk_counts,
                 self.runs,
                 self.write_count,
+                self.run_records,
             ) = backup
             raise
 
@@ -147,6 +151,19 @@ class MemoryStore(Store):
         error: str | None = None,
     ) -> None:
         self.runs.append(result)
+        self.run_records.append(
+            SyncRunRecord.from_result(
+                result=result,
+                source=source,
+                error=error,
+            )
+        )
+
+    def recent_runs(self, limit: int) -> list[SyncRunRecord]:
+        if limit <= 0:
+            raise ValueError("Run-history limit must be greater than zero")
+
+        return list(reversed(self.run_records))[:limit]
 
     def search(
         self,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ from typer.testing import CliRunner
 
 import ragpipe.cli as cli
 from ragpipe.config import Settings
-from ragpipe.models import SearchResult
+from ragpipe.models import SearchResult, SyncRunRecord
 from ragpipe.pipeline import (
     SyncAlreadyRunningError,
     SyncFailedError,
@@ -76,6 +77,53 @@ class SearchStore(ClosingStore):
                 score=0.95,
             )
         ]
+
+
+class RunHistoryStore(ClosingStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requested_limit: int | None = None
+
+    def recent_runs(self, limit: int) -> list[SyncRunRecord]:
+        self.requested_limit = limit
+
+        started = datetime(
+            2026,
+            9,
+            4,
+            9,
+            30,
+            tzinfo=UTC,
+        )
+        finished = started + timedelta(milliseconds=125)
+
+        return [
+            SyncRunRecord(
+                run_id="test-run-id",
+                source="/data/documents",
+                status="succeeded",
+                new_documents=1,
+                changed_documents=0,
+                metadata_changed_documents=0,
+                deleted_documents=0,
+                unchanged_documents=2,
+                embedded_chunks=3,
+                deleted_chunks=0,
+                scanned_documents=3,
+                scanned_bytes=4096,
+                embedding_batches=1,
+                embedding_duration_ms=75.5,
+                started_at=started,
+                finished_at=finished,
+                duration_ms=125.0,
+                error=None,
+            )
+        ]
+
+
+class FailingRunHistoryStore(ClosingStore):
+    def recent_runs(self, limit: int) -> list[SyncRunRecord]:
+        raise RuntimeError("Could not load run history")
 
 
 class FakeSearchEmbedder:
@@ -566,3 +614,73 @@ def test_search_rejects_invalid_metadata_before_opening_store(
 
     assert result.exit_code == 2
     assert expected_message in result.output
+
+
+def test_runs_returns_recent_operational_metrics_and_closes_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunHistoryStore()
+
+    monkeypatch.setattr(
+        cli,
+        "make_store",
+        lambda settings: store,
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "runs",
+            "--limit",
+            "5",
+        ],
+    )
+
+    assert result.exit_code == 0
+
+    payload = json.loads(result.stdout)
+
+    assert payload["limit"] == 5
+    assert payload["count"] == 1
+    assert payload["runs"][0]["run_id"] == "test-run-id"
+    assert payload["runs"][0]["status"] == "succeeded"
+    assert payload["runs"][0]["scanned_documents"] == 3
+    assert payload["runs"][0]["scanned_bytes"] == 4096
+    assert payload["runs"][0]["embedding_batches"] == 1
+    assert payload["runs"][0]["embedding_duration_ms"] == 75.5
+    assert payload["runs"][0]["duration_ms"] == 125.0
+    assert payload["runs"][0]["error"] is None
+
+    assert store.requested_limit == 5
+    assert store.closed is True
+
+
+def test_runs_failure_returns_structured_error_and_closes_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FailingRunHistoryStore()
+
+    monkeypatch.setattr(
+        cli,
+        "make_store",
+        lambda settings: store,
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "runs",
+            "--limit",
+            "5",
+        ],
+    )
+
+    assert result.exit_code == 1
+
+    payload = json.loads(result.stderr)
+
+    assert payload == {
+        "status": "run_history_failed",
+        "error": "RuntimeError: Could not load run history",
+    }
+    assert store.closed is True

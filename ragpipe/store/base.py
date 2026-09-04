@@ -12,6 +12,7 @@ from ragpipe.models import (
     SearchResult,
     StoreStatus,
     SyncResult,
+    SyncRunRecord,
 )
 
 
@@ -73,6 +74,9 @@ class Store(ABC):
         limit: int,
         metadata_filter: Mapping[str, Any] | None = None,
     ) -> list[SearchResult]: ...
+
+    @abstractmethod
+    def recent_runs(self, limit: int) -> list[SyncRunRecord]: ...
 
     @abstractmethod
     def status(self) -> StoreStatus: ...
