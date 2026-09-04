@@ -1,8 +1,10 @@
 # ragpipe
 
+<!-- Documentation includes schema revisions through 0005. -->
+
 `ragpipe` is the data pipeline underneath a retrieval-augmented generation (RAG) system. It keeps PostgreSQL and pgvector synchronized with a changing folder of PDF, Markdown, and text documents. It detects additions, content changes, metadata changes, and deletions using deterministic SHA-256 hashes, then embeds only the chunks that actually need new vectors.
 
-> Everyone builds the chatbot on top. This project builds the pipeline underneathâ€”the part that must stay correct when a document changes, disappears, or thousands arrive overnight.
+> Everyone builds the chatbot on top. This project builds the pipeline underneath—the part that must stay correct when a document changes, disappears, or thousands arrive overnight.
 
 ## What is implemented
 
@@ -17,13 +19,14 @@
 - Persisted, bounded, credential-sanitized failed-run information
 - Idempotent no-op synchronization for unchanged files
 - PostgreSQL advisory locking that rejects overlapping synchronization runs
-- `ragpipe sync`, `ragpipe search`, `ragpipe evaluate`, and `ragpipe status` commands
+- `ragpipe sync`, `ragpipe search`, `ragpipe evaluate`, `ragpipe runs`, and `ragpipe status` commands
 - Cosine-similarity retrieval with embedding-model and JSONB metadata filtering
 - Deterministic result ordering for equal similarity scores
 - PostgreSQL HNSW cosine index for vector search
 - PostgreSQL GIN index for document-metadata containment filters
 - JSONL retrieval evaluation with Hit Rate@K, MRR@K, and per-query ranks
-- Structured JSON operational logs and persisted synchronization statistics
+- Structured JSON logs, persisted synchronization statistics, source-volume metrics, and embedding timings
+- Recent operational run history with successful and sanitized failed-run details
 - Unit and pgvector integration tests covering synchronization, metadata, rollback, locking, migrations, search, and evaluation
 - Docker Compose, package metadata, linting, type checking, coverage enforcement, builds, and GitHub Actions CI
 
@@ -90,6 +93,8 @@ ragpipe search \
 ragpipe evaluate \
   --dataset evaluation/sample.jsonl \
   --k 5
+
+ragpipe runs --limit 10
 ```
 
 The second unchanged synchronization should report:
@@ -289,8 +294,9 @@ Relevant revisions:
 | `0002_vector_search_index` | HNSW cosine index for vector retrieval |
 | `0003_document_metadata` | Document metadata, metadata hashes, and metadata-change statistics |
 | `0004_document_metadata_index` | GIN `jsonb_path_ops` index for metadata containment filters |
+| `0005_operational_metrics` | Source-volume metrics, embedding timings, and recent-run index |
 
-The application currently requires `0004_document_metadata_index` at startup.
+The application currently requires `0005_operational_metrics` at startup.
 
 ## Concurrent synchronization
 
@@ -307,6 +313,33 @@ Document, metadata, and vector changes are committed atomically. If scanning, lo
 A separate failed-run record is then stored with a bounded, credential-sanitized error message. This preserves operational visibility without leaving a partially updated corpus.
 
 Search and evaluation errors are returned as structured JSON and do not modify the corpus.
+
+## Operational metrics and run history
+
+Every synchronization records both its corpus outcome and operational measurements in `sync_runs`:
+
+- `scanned_documents`: supported source documents observed during scanning
+- `scanned_bytes`: combined byte size of those documents
+- `embedding_batches`: embedding-provider calls attempted during the run
+- `embedding_duration_ms`: cumulative wall-clock time spent in embedding-provider calls
+- `duration_ms`: total run duration derived from `started_at` and `finished_at`
+- New, content-changed, metadata-changed, deleted, and unchanged document counts
+- Embedded and deleted chunk counts
+- Final status and a bounded, credential-sanitized failure message
+
+View the newest runs without writing SQL:
+
+```bash
+ragpipe runs --limit 10
+```
+
+The limit must be between `1` and `100`. Results are ordered by completion time from newest to oldest. The `sync_runs_finished_at_idx` index supports this query.
+
+For failed runs, `embedded_chunks` and `deleted_chunks` describe committed changes and therefore remain zero after rollback. `embedding_batches` and `embedding_duration_ms` describe attempted work and may be greater than zero. This distinction prevents rolled-back changes from being reported as committed while preserving useful failure diagnostics.
+
+Rows created before migration `0005_operational_metrics` are retained and backfilled with zero for the newly introduced metrics. Those zeros mean the measurements were unavailable for historical runs, not necessarily that no scanning occurred.
+
+The local embedding provider does not incur API charges, so Ragpipe does not invent a cost metric. A future billable provider can add token and provider-reported cost usage without changing the meaning of the current timing counters.
 
 ## CLI exit codes
 
@@ -345,6 +378,7 @@ The test suite includes:
 - Concurrent synchronization rejection
 - Migration upgrade/downgrade and schema-revision validation
 - HNSW and metadata GIN index verification
+- Operational-metrics persistence, run ordering, limits, and failed-run semantics
 - Cosine ranking, model filtering, limits, and deterministic ordering
 - JSONB object and array metadata containment filters
 - Strict metadata manifest and CLI filter validation
@@ -364,7 +398,7 @@ The database-name guard prevents integration fixtures from resetting the develop
 
 Implement `EmbeddingProvider` to add another local model or an API provider such as OpenAI or Cohere. Implement `Chunker` to add semantic or document-aware splitting.
 
-Object-store scanners can feed the same `ScannedDocument` and `SourceDiff` contracts. Future releases can add authenticated access-control enforcement, multi-source tenancy, cloud sources, evaluation-result persistence, and Prometheus/OpenTelemetry metrics.
+Object-store scanners can feed the same `ScannedDocument` and `SourceDiff` contracts. Future releases can add authenticated access-control enforcement, multi-source tenancy, cloud sources, evaluation-result persistence, provider-reported embedding cost, and Prometheus/OpenTelemetry export.
 
 ## Operational limitations
 
@@ -379,6 +413,7 @@ Object-store scanners can feed the same `ScannedDocument` and `SourceDiff` contr
 - Search returns stored chunk content directly; do not expose it to untrusted callers without an authorization layer.
 - Evaluation reports are printed as JSON and are not persisted.
 - Evaluation cases do not currently accept metadata filters.
+- Operational metrics are persisted and available as JSON but are not yet exported in Prometheus or OpenTelemetry format.
 - Changing the embedding model does not automatically re-embed unchanged documents.
 
 ## License

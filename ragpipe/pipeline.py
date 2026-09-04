@@ -4,6 +4,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 
 import structlog
 
@@ -80,11 +81,17 @@ class SyncPipeline:
         unchanged_documents = 0
         embedded_chunks = 0
         deleted_chunks = 0
+        scanned_documents = 0
+        scanned_bytes = 0
+        embedding_batches = 0
+        embedding_duration_ms = 0.0
 
         try:
             with self.store.sync_lock():
                 try:
                     scanned = scan_source(source)
+                    scanned_documents = len(scanned)
+                    scanned_bytes = sum(document.size_bytes for document in scanned.values())
 
                     with self.store.transaction():
                         previous = self.store.document_states()
@@ -125,9 +132,18 @@ class SyncPipeline:
                                 self.batch_size,
                             ):
                                 batch = chunks[batch_start : batch_start + self.batch_size]
-                                embeddings.extend(
-                                    self.embedder.embed([chunk.text for chunk in batch])
-                                )
+                                batch_texts = [chunk.text for chunk in batch]
+                                embedding_started = perf_counter()
+                                embedding_batches += 1
+
+                                try:
+                                    batch_embeddings = self.embedder.embed(batch_texts)
+                                finally:
+                                    embedding_duration_ms += (
+                                        perf_counter() - embedding_started
+                                    ) * 1000
+
+                                embeddings.extend(batch_embeddings)
 
                             self.store.replace_document(
                                 path=item.path,
@@ -156,6 +172,10 @@ class SyncPipeline:
                             deleted_chunks=deleted_chunks,
                             started_at=started,
                             finished_at=finished,
+                            scanned_documents=scanned_documents,
+                            scanned_bytes=scanned_bytes,
+                            embedding_batches=embedding_batches,
+                            embedding_duration_ms=embedding_duration_ms,
                         )
 
                         self.store.record_run(
@@ -182,6 +202,10 @@ class SyncPipeline:
                         deleted_chunks=0,
                         started_at=started,
                         finished_at=finished,
+                        scanned_documents=scanned_documents,
+                        scanned_bytes=scanned_bytes,
+                        embedding_batches=embedding_batches,
+                        embedding_duration_ms=embedding_duration_ms,
                     )
 
                     try:

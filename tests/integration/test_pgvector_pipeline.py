@@ -250,6 +250,23 @@ def test_failed_changed_document_sync_rolls_back(
 
     assert rolled_back_status.last_sync_status == "failed"
 
+    failed_run = pgvector_store.recent_runs(limit=1)[0]
+
+    assert failed_run.status == "failed"
+    assert failed_run.changed_documents == 1
+    assert failed_run.scanned_documents == 1
+    assert failed_run.scanned_bytes == len(b"Updated policy")
+    assert failed_run.embedding_batches == 1
+    assert failed_run.embedding_duration_ms >= 0
+    assert failed_run.duration_ms >= 0
+
+    # These represent committed changes, so they remain zero after rollback.
+    assert failed_run.embedded_chunks == 0
+    assert failed_run.deleted_chunks == 0
+
+    assert failed_run.error is not None
+    assert "Simulated embedding failure" in failed_run.error
+
     with pgvector_store.transaction():
         rolled_back_state = pgvector_store.document_states()["policy.txt"]
 
@@ -614,3 +631,70 @@ def test_document_metadata_gin_index_exists(
 
     assert "using gin" in index_definition
     assert "jsonb_path_ops" in index_definition
+
+
+def test_sync_operational_metrics_are_persisted(
+    tmp_path: Path,
+    pgvector_store: PgVectorStore,
+) -> None:
+    content = "Operational metrics test document."
+
+    (tmp_path / "metrics.txt").write_text(
+        content,
+        encoding="utf-8",
+    )
+
+    embedder = PgVectorFakeEmbedder()
+    result = create_pipeline(
+        pgvector_store,
+        embedder=embedder,
+    ).sync(tmp_path)
+
+    if TEST_DATABASE_URL is None:
+        pytest.fail("RAGPIPE_TEST_DATABASE_URL unexpectedly missing")
+
+    with psycopg.connect(TEST_DATABASE_URL) as connection:
+        row = connection.execute(
+            """
+            SELECT
+                scanned_documents,
+                scanned_bytes,
+                embedding_batches,
+                embedding_duration_ms,
+                EXTRACT(
+                    EPOCH FROM finished_at - started_at
+                ) * 1000 AS total_duration_ms
+            FROM sync_runs
+            WHERE id = %s
+            """,
+            (result.run_id,),
+        ).fetchone()
+
+    with pytest.raises(
+        ValueError,
+        match="greater than zero",
+    ):
+        pgvector_store.recent_runs(limit=0)
+    assert row is not None
+    assert int(row[0]) == 1
+    assert int(row[1]) == len(content.encode("utf-8"))
+    assert int(row[2]) == 1
+    assert float(row[3]) >= 0
+    assert float(row[4]) >= 0
+
+    assert result.scanned_documents == 1
+    assert result.scanned_bytes == len(content.encode("utf-8"))
+    assert result.embedding_batches == 1
+    assert result.embedding_duration_ms >= 0
+
+    recent = pgvector_store.recent_runs(limit=1)
+
+    assert len(recent) == 1
+    assert recent[0].run_id == result.run_id
+    assert recent[0].status == "succeeded"
+    assert recent[0].scanned_documents == 1
+    assert recent[0].scanned_bytes == len(content.encode("utf-8"))
+    assert recent[0].embedding_batches == 1
+    assert recent[0].embedding_duration_ms >= 0
+    assert recent[0].duration_ms >= 0
+    assert recent[0].error is None

@@ -17,10 +17,11 @@ from ragpipe.models import (
     SearchResult,
     StoreStatus,
     SyncResult,
+    SyncRunRecord,
 )
 from ragpipe.store.base import Store, SyncLockUnavailableError
 
-EXPECTED_SCHEMA_REVISION = "0004_document_metadata_index"
+EXPECTED_SCHEMA_REVISION = "0005_operational_metrics"
 SYNC_LOCK_NAME = "ragpipe:global-sync"
 
 
@@ -331,11 +332,19 @@ class PgVectorStore(Store):
                     unchanged_documents,
                     embedded_chunks,
                     deleted_chunks,
+                    scanned_documents,
+                    scanned_bytes,
+                    embedding_batches,
+                    embedding_duration_ms,
                     started_at,
                     finished_at,
                     error
                 )
                 VALUES(
+                    %s,
+                    %s,
+                    %s,
+                    %s,
                     %s,
                     %s,
                     %s,
@@ -362,11 +371,79 @@ class PgVectorStore(Store):
                     result.unchanged_documents,
                     result.embedded_chunks,
                     result.deleted_chunks,
+                    result.scanned_documents,
+                    result.scanned_bytes,
+                    result.embedding_batches,
+                    result.embedding_duration_ms,
                     result.started_at,
                     result.finished_at,
                     error,
                 ),
             )
+
+    def recent_runs(self, limit: int) -> list[SyncRunRecord]:
+        if limit <= 0:
+            raise ValueError("Run-history limit must be greater than zero")
+
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id::text,
+                    source,
+                    status,
+                    new_documents,
+                    changed_documents,
+                    metadata_changed_documents,
+                    deleted_documents,
+                    unchanged_documents,
+                    embedded_chunks,
+                    deleted_chunks,
+                    scanned_documents,
+                    scanned_bytes,
+                    embedding_batches,
+                    embedding_duration_ms,
+                    started_at,
+                    finished_at,
+                    GREATEST(
+                        0,
+                        EXTRACT(
+                            EPOCH FROM finished_at - started_at
+                        ) * 1000
+                    ) AS duration_ms,
+                    error
+                FROM sync_runs
+                ORDER BY finished_at DESC, id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+
+            rows = cur.fetchall()
+
+        return [
+            SyncRunRecord(
+                run_id=str(row[0]),
+                source=str(row[1]),
+                status=str(row[2]),
+                new_documents=int(row[3]),
+                changed_documents=int(row[4]),
+                metadata_changed_documents=int(row[5]),
+                deleted_documents=int(row[6]),
+                unchanged_documents=int(row[7]),
+                embedded_chunks=int(row[8]),
+                deleted_chunks=int(row[9]),
+                scanned_documents=int(row[10]),
+                scanned_bytes=int(row[11]),
+                embedding_batches=int(row[12]),
+                embedding_duration_ms=float(row[13]),
+                started_at=row[14],
+                finished_at=row[15],
+                duration_ms=float(row[16]),
+                error=None if row[17] is None else str(row[17]),
+            )
+            for row in rows
+        ]
 
     def search(
         self,

@@ -29,6 +29,13 @@ def test_full_sync_is_idempotent(tmp_path: Path) -> None:
     assert store.write_count == writes_after_first
     assert embedder.texts == texts_after_first
     assert store.status().documents == 1 and store.status().chunks == 1
+    assert first.scanned_documents == 1
+    assert first.scanned_bytes == len(b"one document")
+    assert first.embedding_batches == 1
+    assert first.embedding_duration_ms >= 0
+    assert second.scanned_documents == 1
+    assert second.embedding_batches == 0
+    assert second.embedding_duration_ms == 0
 
 
 def test_change_only_reembeds_changed_file(tmp_path: Path) -> None:
@@ -104,6 +111,11 @@ def test_failed_sync_is_recorded_after_rollback(
 
     assert captured.value.run_id == store.runs[-1].run_id
     assert store.runs[-1].status == "failed"
+    assert store.runs[-1].scanned_documents == 1
+    assert store.runs[-1].scanned_bytes == len(b"Updated policy")
+    assert store.runs[-1].embedding_batches == 1
+    assert store.runs[-1].embedding_duration_ms >= 0
+    assert store.runs[-1].embedded_chunks == 0
     assert store.status().last_sync_status == "failed"
 
     # The original document remains because the changed-document

@@ -368,6 +368,62 @@ def evaluate(
 
 
 @app.command()
+def runs(
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            "-n",
+            min=1,
+            max=100,
+            help="Maximum number of recent synchronization runs.",
+        ),
+    ] = 10,
+) -> None:
+    settings = Settings()
+    configure_logging(settings.log_level)
+
+    store: PgVectorStore | None = None
+
+    try:
+        store = make_store(settings)
+        records = store.recent_runs(limit=limit)
+
+        typer.echo(
+            json.dumps(
+                {
+                    "limit": limit,
+                    "count": len(records),
+                    "runs": [asdict(record) for record in records],
+                },
+                default=str,
+                indent=2,
+            )
+        )
+
+    except SchemaNotReadyError as error:
+        print_schema_error(error)
+        raise typer.Exit(code=2) from None
+
+    except Exception as error:
+        typer.echo(
+            json.dumps(
+                {
+                    "status": "run_history_failed",
+                    "error": sanitize_error(error),
+                },
+                indent=2,
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+
+    finally:
+        if store is not None:
+            store.close()
+
+
+@app.command()
 def status() -> None:
     settings = Settings()
     store: PgVectorStore | None = None
