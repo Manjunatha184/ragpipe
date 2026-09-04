@@ -9,6 +9,7 @@ from ragpipe.models import (
     EMPTY_METADATA_HASH,
     Chunk,
     DocumentState,
+    OperationalMetricsSnapshot,
     SearchResult,
     StoreStatus,
     SyncResult,
@@ -77,6 +78,11 @@ class Store(ABC):
 
     @abstractmethod
     def recent_runs(self, limit: int) -> list[SyncRunRecord]: ...
+
+    @abstractmethod
+    def operational_metrics(
+        self,
+    ) -> OperationalMetricsSnapshot: ...
 
     @abstractmethod
     def status(self) -> StoreStatus: ...

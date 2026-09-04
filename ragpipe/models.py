@@ -137,6 +137,29 @@ class SyncRunRecord:
 
 
 @dataclass(frozen=True)
+class OperationalMetricsSnapshot:
+    documents: int
+    chunks: int
+    sync_runs_running: int
+    sync_runs_succeeded: int
+    sync_runs_failed: int
+    new_documents_total: int
+    changed_documents_total: int
+    metadata_changed_documents_total: int
+    deleted_documents_total: int
+    unchanged_documents_total: int
+    embedded_chunks_total: int
+    deleted_chunks_total: int
+    scanned_documents_total: int
+    scanned_bytes_total: int
+    embedding_batches_total: int
+    embedding_duration_ms_total: float
+    last_sync_status: str | None
+    last_sync_at: datetime | None
+    last_sync_duration_ms: float | None
+
+
+@dataclass(frozen=True)
 class StoreStatus:
     documents: int
     chunks: int
