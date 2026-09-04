@@ -4,7 +4,6 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path
 from typing import Any
 
 EMPTY_METADATA_HASH = hashlib.sha256(b"{}").hexdigest()
@@ -21,7 +20,6 @@ class ChangeType(StrEnum):
 @dataclass(frozen=True)
 class ScannedDocument:
     path: str
-    absolute_path: Path
     content_hash: str
     size_bytes: int
     media_type: str

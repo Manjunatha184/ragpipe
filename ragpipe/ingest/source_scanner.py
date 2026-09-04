@@ -73,7 +73,6 @@ def scan_source(source: Path) -> dict[str, ScannedDocument]:
 
         result[relative] = ScannedDocument(
             path=relative,
-            absolute_path=path,
             content_hash=sha256_file(path),
             size_bytes=path.stat().st_size,
             media_type=(mimetypes.guess_type(path.name)[0] or "application/octet-stream"),

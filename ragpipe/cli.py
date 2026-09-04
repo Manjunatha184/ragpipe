@@ -17,6 +17,7 @@ from ragpipe.evaluation import (
     RetrievalEvaluator,
     load_evaluation_cases,
 )
+from ragpipe.ingest.source import LocalFolderSource
 from ragpipe.logging import configure_logging
 from ragpipe.pipeline import (
     SyncAlreadyRunningError,
@@ -127,7 +128,7 @@ def sync(
             ),
             embedder=embedder,
             batch_size=settings.batch_size,
-        ).sync(source)
+        ).sync(LocalFolderSource(source))
 
         typer.echo(
             json.dumps(
