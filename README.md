@@ -15,11 +15,12 @@
 * Persisted, credential-sanitized failed-run information
 * Idempotent no-op synchronization for unchanged files
 * PostgreSQL advisory locking that rejects overlapping synchronization runs
-* `ragpipe sync`, `ragpipe search`, and `ragpipe status` commands
+* `ragpipe sync`, `ragpipe search`, `ragpipe evaluate`, and `ragpipe status` commands
 * Cosine-similarity retrieval with embedding-model filtering and deterministic ranking
 * PostgreSQL HNSW cosine index for scalable nearest-neighbor search
+* JSONL-based retrieval evaluation with Hit Rate@K, MRR@K, and per-query ranks
 * JSON structured operational logs and persisted sync-run statistics
-* Unit and pgvector integration tests covering synchronization, rollback, locking, migrations, and vector search
+* Unit and pgvector integration tests covering synchronization, rollback, locking, migrations, search, and evaluation
 * Docker Compose, package metadata, type/lint configuration, and GitHub Actions CI
 
 Chat/answer generation, a web UI, authentication, and multi-tenancy are intentionally outside the current scope.
@@ -34,14 +35,14 @@ flowchart TD
     D --> E[(Postgres and pgvector)]
     B -->|deleted| E
     B -->|unchanged| F[No embedding or document writes]
-    Q[Search query] --> G[Query embedding]
+    Q[Search or evaluation query] --> G[Query embedding]
     G --> E
     E --> R[Ranked matching chunks]
 ```
 
 The pipeline reads prior state, computes a deterministic diff, then applies deletes and replacements inside one database transaction. A changed path’s old document cascades to all old chunks before its replacement is inserted. Any loader, embedding, or database failure rolls the transaction back.
 
-Search embeds the query with the configured model and compares it only with chunks created by that same model.
+Search embeds the query with the configured model and compares it only with chunks created by that same model. Evaluation runs a collection of expected query-to-document matches through the same search path.
 
 ## Quick start
 
@@ -60,7 +61,14 @@ alembic upgrade head
 ragpipe sync --source ./sample_docs
 ragpipe sync --source ./sample_docs
 ragpipe status
-ragpipe search --query "What is Ragpipe?" --limit 5
+
+ragpipe search \
+  --query "What is Ragpipe?" \
+  --limit 5
+
+ragpipe evaluate \
+  --dataset evaluation/sample.jsonl \
+  --k 5
 ```
 
 The second unchanged synchronization should report:
@@ -114,7 +122,44 @@ Higher scores indicate closer vector similarity. The score is a ranking signal, 
 
 Search only compares chunks produced by the configured embedding model. Vectors from different models are filtered because their embedding spaces are not comparable. The result limit must be between `1` and `100`.
 
-Search uses PostgreSQL’s HNSW index with `vector_cosine_ops`. It can safely run while synchronization is in progress and sees the last committed corpus through PostgreSQL transaction isolation.
+The schema provides an HNSW index using `vector_cosine_ops` for scalable approximate nearest-neighbor search. PostgreSQL may still choose an exact sequential scan for very small corpora.
+
+Search can safely run while synchronization is in progress and sees the last committed corpus through PostgreSQL transaction isolation.
+
+## Retrieval evaluation
+
+Ragpipe can measure whether search retrieves an expected document for a set of test queries.
+
+Evaluation datasets use JSON Lines format with one case per line:
+
+```json
+{"query": "What does the demo document demonstrate?", "expected_document": "welcome.md"}
+{"query": "What should happen after editing a document?", "expected_document": "welcome.md"}
+```
+
+The `expected_document` value must exactly match the document’s path relative to the synchronized source root.
+
+Run an evaluation with:
+
+```bash
+ragpipe evaluate \
+  --dataset evaluation/sample.jsonl \
+  --k 5
+```
+
+The evaluation report includes:
+
+* `total_cases`: number of evaluated queries
+* `hits`: number of queries where the expected document appeared
+* `hit_rate_at_k`: fraction of queries where the expected document appeared in the top K chunks
+* `mean_reciprocal_rank_at_k`: average reciprocal rank of the first matching chunk
+* Per-query retrieved document paths, matching rank, reciprocal rank, and hit status
+
+For example, if the expected document appears first, its reciprocal rank is `1.0`. If it appears second, its reciprocal rank is `0.5`. If it is absent from the top K results, its reciprocal rank is `0.0`.
+
+Queries are embedded in batches using `RAGPIPE_BATCH_SIZE`. Each query is then searched independently against pgvector.
+
+The included sample dataset is only a smoke test because the sample corpus contains one document. A meaningful quality benchmark should contain multiple documents, varied queries, difficult negative cases, and expected documents at different ranks.
 
 ## Database migrations
 
@@ -154,7 +199,7 @@ A rejected concurrent attempt exits with code `3`. It does not scan documents, g
 
 The lock is automatically released when synchronization finishes or its PostgreSQL session closes. An orchestrator can safely retry a rejected run later.
 
-Search commands do not acquire this lock because they only read the last committed corpus.
+Search and evaluation commands do not acquire this lock because they only read the last committed corpus.
 
 ## Failure handling
 
@@ -162,14 +207,19 @@ Document and vector changes are committed atomically. If loading, chunking, embe
 
 A separate failed-run record is then stored with a bounded, credential-sanitized error message. This preserves operational visibility without leaving a partially updated corpus.
 
+Search and evaluation errors are returned as structured JSON and do not modify the corpus.
+
 ## CLI exit codes
 
 | Code | Meaning                                                     |
 | ---: | ----------------------------------------------------------- |
 |  `0` | Command completed successfully                              |
-|  `1` | Synchronization or search failed                            |
+|  `1` | Synchronization, search, or evaluation failed               |
 |  `2` | Database schema is missing, outdated, or incompatible       |
 |  `3` | Another synchronization already owns the database sync lock |
+|  `4` | Evaluation dataset content is invalid                       |
+
+Typer may also return exit code `2` for invalid command-line arguments, such as a missing required option or an out-of-range value.
 
 ## Development and verification
 
@@ -205,13 +255,16 @@ The test suite includes:
 * Embedding-model filtering
 * Search limits and validation
 * HNSW index verification
-* CLI output and exit codes
+* Evaluation JSONL validation
+* Hit Rate@K and MRR@K calculations
+* Batched evaluation query embeddings
+* CLI output, resource cleanup, and exit codes
 
 ## Extension points
 
 Implement `EmbeddingProvider` to add another local model or an API provider such as OpenAI or Cohere. Implement `Chunker` to add semantic or document-aware splitting.
 
-Object-store scanners can feed the same `ScannedDocument` and `SourceDiff` contracts. Future releases can add metadata filters, access control, retrieval evaluation, cloud sources, and Prometheus/OpenTelemetry metrics.
+Object-store scanners can feed the same `ScannedDocument` and `SourceDiff` contracts. Future releases can add metadata filters, access control, cloud sources, evaluation-result persistence, and Prometheus/OpenTelemetry metrics.
 
 ## Operational limitations
 
@@ -222,6 +275,7 @@ Object-store scanners can feed the same `ScannedDocument` and `SourceDiff` contr
 * Synchronizations are serialized through a database advisory lock; rejected attempts must be retried.
 * HNSW search is approximate and optimized for scalable nearest-neighbor retrieval.
 * Search returns stored chunk content directly and does not implement user authorization or metadata-based access control.
+* Evaluation reports are printed as JSON and are not persisted.
 * Changing the embedding model does not automatically re-embed unchanged documents.
 
 ## License
