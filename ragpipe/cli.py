@@ -17,7 +17,14 @@ from ragpipe.evaluation import (
     RetrievalEvaluator,
     load_evaluation_cases,
 )
-from ragpipe.ingest.source import LocalFolderSource
+from ragpipe.ingest.s3_source import (
+    S3DocumentSource,
+    S3SourceError,
+)
+from ragpipe.ingest.source import (
+    DocumentSource,
+    LocalFolderSource,
+)
 from ragpipe.logging import configure_logging
 from ragpipe.pipeline import (
     SyncAlreadyRunningError,
@@ -95,18 +102,41 @@ def parse_metadata_filter(value: str | None) -> dict[str, Any] | None:
     return cast(dict[str, Any], parsed)
 
 
+def make_document_source(value: str) -> DocumentSource:
+    """Create a document source from a local path or S3 URI."""
+
+    if value.startswith("s3://"):
+        try:
+            return S3DocumentSource(value)
+        except S3SourceError as error:
+            raise typer.BadParameter(
+                str(error),
+                param_hint="--source",
+            ) from error
+
+    path = Path(value).expanduser()
+
+    if not path.is_dir():
+        raise typer.BadParameter(
+            f"Local source directory does not exist: {value}",
+            param_hint="--source",
+        )
+
+    return LocalFolderSource(path)
+
+
 @app.command()
 def sync(
     source: Annotated[
-        Path,
+        str,
         typer.Option(
             "--source",
             "-s",
-            exists=True,
-            file_okay=False,
+            help="Local directory or s3://bucket/prefix URI.",
         ),
     ],
 ) -> None:
+    document_source = make_document_source(source)
     settings = Settings(source=source)
     configure_logging(settings.log_level)
 
@@ -128,7 +158,7 @@ def sync(
             ),
             embedder=embedder,
             batch_size=settings.batch_size,
-        ).sync(LocalFolderSource(source))
+        ).sync(document_source)
 
         typer.echo(
             json.dumps(

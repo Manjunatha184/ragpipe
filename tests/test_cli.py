@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 import ragpipe.cli as cli
 from ragpipe.config import Settings
+from ragpipe.ingest.source import DocumentSource
 from ragpipe.models import SearchResult, SyncRunRecord
 from ragpipe.pipeline import (
     SyncAlreadyRunningError,
@@ -33,7 +34,7 @@ class FailingPipeline:
     def __init__(self, **kwargs: Any) -> None:
         pass
 
-    def sync(self, source: Path) -> None:
+    def sync(self, source: DocumentSource) -> None:
         raise SyncFailedError(
             run_id="test-run-id",
             safe_message="Embedding service unavailable",
@@ -44,7 +45,7 @@ class BusyPipeline:
     def __init__(self, **kwargs: Any) -> None:
         pass
 
-    def sync(self, source: Path) -> None:
+    def sync(self, source: DocumentSource) -> None:
         raise SyncAlreadyRunningError()
 
 
@@ -684,3 +685,93 @@ def test_runs_failure_returns_structured_error_and_closes_store(
         "error": "RuntimeError: Could not load run history",
     }
     assert store.closed is True
+
+
+def test_make_document_source_accepts_local_directory(
+    tmp_path: Path,
+) -> None:
+    source = cli.make_document_source(str(tmp_path))
+
+    assert isinstance(
+        source,
+        cli.LocalFolderSource,
+    )
+    assert source.label == str(tmp_path.resolve())
+
+
+def test_make_document_source_accepts_s3_uri(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_source = cli.LocalFolderSource(tmp_path)
+    received: list[str] = []
+
+    def fake_s3_source(uri: str) -> cli.LocalFolderSource:
+        received.append(uri)
+        return local_source
+
+    monkeypatch.setattr(
+        cli,
+        "S3DocumentSource",
+        fake_s3_source,
+    )
+
+    source = cli.make_document_source("s3://documents/knowledge")
+
+    assert source is local_source
+    assert received == ["s3://documents/knowledge"]
+
+
+def test_sync_rejects_missing_local_source_before_opening_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_store_creation(
+        settings: Settings,
+    ) -> ClosingStore:
+        raise AssertionError("Store must not be created for an invalid source")
+
+    monkeypatch.setattr(
+        cli,
+        "make_store",
+        unexpected_store_creation,
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "sync",
+            "--source",
+            str(tmp_path / "missing"),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Local source directory does not exist" in result.output
+
+
+def test_sync_rejects_invalid_s3_uri_before_opening_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_store_creation(
+        settings: Settings,
+    ) -> ClosingStore:
+        raise AssertionError("Store must not be created for an invalid source")
+
+    monkeypatch.setattr(
+        cli,
+        "make_store",
+        unexpected_store_creation,
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "sync",
+            "--source",
+            "s3:///missing-bucket",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Invalid S3 source URI" in result.output

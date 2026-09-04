@@ -23,6 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 local = ["sentence-transformers>=3,<6"]
 dev = ["pytest>=8,<10", "pytest-cov>=5,<8", "ruff>=0.8,<1", "mypy>=1.13,<2", "build>=1.2,<2"]
+s3 = ["boto3>=1.35,<2"]
 
 [project.scripts]
 ragpipe = "ragpipe.cli:app"
@@ -66,5 +67,9 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = "sentence_transformers.*"
+module = ["sentence_transformers", "sentence_transformers.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["boto3", "boto3.*"]
 ignore_missing_imports = true

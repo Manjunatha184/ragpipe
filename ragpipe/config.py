@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,7 +13,7 @@ class Settings(BaseSettings):
     chunk_overlap: int = Field(default=120, ge=0)
     batch_size: int = Field(default=64, gt=0, le=2048)
     log_level: str = "INFO"
-    source: Path | None = None
+    source: str | None = None
 
     @model_validator(mode="after")
     def validate_overlap(self) -> "Settings":

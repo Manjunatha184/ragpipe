@@ -45,6 +45,46 @@ def _validate_document_path(path: str) -> None:
         raise MetadataManifestError(f"Metadata manifest contains unsafe document path: {path!r}")
 
 
+def parse_metadata_manifest(
+    content: bytes,
+) -> dict[str, dict[str, Any]]:
+    """Parse and validate metadata-manifest bytes."""
+
+    if len(content) > MAX_METADATA_FILE_SIZE_BYTES:
+        raise MetadataManifestError(
+            f"{METADATA_FILENAME} must not exceed {MAX_METADATA_FILE_SIZE_BYTES} bytes."
+        )
+
+    try:
+        decoded = content.decode("utf-8")
+    except UnicodeError as error:
+        raise MetadataManifestError(f"{METADATA_FILENAME} must be valid UTF-8.") from error
+
+    try:
+        payload: Any = json.loads(decoded)
+    except json.JSONDecodeError as error:
+        raise MetadataManifestError(f"{METADATA_FILENAME} is not valid JSON.") from error
+
+    if not isinstance(payload, dict):
+        raise MetadataManifestError(f"{METADATA_FILENAME} must contain a JSON object.")
+
+    result: dict[str, dict[str, Any]] = {}
+
+    for document_path, document_metadata in payload.items():
+        _validate_document_path(document_path)
+
+        if not isinstance(document_metadata, dict):
+            raise MetadataManifestError(f"Metadata for {document_path!r} must be a JSON object.")
+
+        normalized_metadata = dict(document_metadata)
+
+        # Validate nested values and reject NaN/Infinity.
+        metadata_hash(normalized_metadata)
+        result[document_path] = normalized_metadata
+
+    return result
+
+
 def load_metadata_manifest(
     source_root: Path,
 ) -> dict[str, dict[str, Any]]:
@@ -67,29 +107,8 @@ def load_metadata_manifest(
                 f"{METADATA_FILENAME} must not exceed {MAX_METADATA_FILE_SIZE_BYTES} bytes."
             )
 
-        payload: Any = json.loads(manifest.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        raise MetadataManifestError(f"{METADATA_FILENAME} is not valid JSON.") from error
-    except UnicodeError as error:
-        raise MetadataManifestError(f"{METADATA_FILENAME} must be valid UTF-8.") from error
+        content = manifest.read_bytes()
     except OSError as error:
         raise MetadataManifestError(f"Could not read {METADATA_FILENAME}: {error}") from error
 
-    if not isinstance(payload, dict):
-        raise MetadataManifestError(f"{METADATA_FILENAME} must contain a JSON object.")
-
-    result: dict[str, dict[str, Any]] = {}
-
-    for document_path, document_metadata in payload.items():
-        _validate_document_path(document_path)
-
-        if not isinstance(document_metadata, dict):
-            raise MetadataManifestError(f"Metadata for {document_path!r} must be a JSON object.")
-
-        normalized_metadata = dict(document_metadata)
-
-        # Validate nested values and reject NaN/Infinity.
-        metadata_hash(normalized_metadata)
-        result[document_path] = normalized_metadata
-
-    return result
+    return parse_metadata_manifest(content)
