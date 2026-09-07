@@ -17,6 +17,7 @@
 - Metadata-only updates without deleting chunks or regenerating embeddings
 - Recursive character chunking with configurable size and overlap
 - A provider interface plus local `sentence-transformers/all-MiniLM-L6-v2` embeddings
+- Bounded-memory embedding batches that span document boundaries
 - PostgreSQL document state and pgvector embeddings with foreign-key cascade deletion
 - One atomic database transaction per synchronization with rollback on failure
 - Persisted, bounded, credential-sanitized failed-run information
@@ -33,6 +34,7 @@
 - Prometheus text export and a lightweight HTTP `/metrics` endpoint backed by persisted database aggregates
 - Unit and pgvector integration tests covering synchronization, metadata, rollback, locking, migrations, search, and evaluation
 - Docker Compose, package metadata, linting, type checking, coverage enforcement, builds, and GitHub Actions CI
+- Reproducible load-test corpus generation, measured benchmarks, and a production operations runbook
 
 Chat/answer generation, a web UI, authentication, authorization, and multi-tenancy are intentionally outside the current scope.
 
@@ -480,6 +482,7 @@ The test suite includes:
 - S3 URI validation, pagination, filtering, metadata, exact hashing, consistency checks, and idempotency
 - New, changed, metadata-changed, deleted, and unchanged detection
 - Idempotent synchronization and metadata-only updates without re-embedding
+- Cross-document embedding batching, bounded-memory mapping, and provider output-count validation
 - Changed-document replacement and deleted-document cleanup
 - Transaction rollback and failed-run persistence
 - Concurrent synchronization rejection
@@ -501,6 +504,8 @@ python -m pytest
 ```
 
 The database-name guard prevents integration fixtures from resetting the development or production database.
+
+Measured performance results and reproduction steps are documented in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). Production scheduling, monitoring, upgrades, backup, recovery, and incident procedures are documented in [`docs/OPERATIONS.md`](docs/OPERATIONS.md). Release history is maintained in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Extension points
 
