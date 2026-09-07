@@ -56,3 +56,11 @@ jobs:
 
       - name: Build package
         run: python -m build
+
+      - name: Smoke test built wheel
+        run: |
+          python -m venv /tmp/ragpipe-wheel-smoke
+          /tmp/ragpipe-wheel-smoke/bin/pip install dist/*.whl
+          /tmp/ragpipe-wheel-smoke/bin/ragpipe --help
+          /tmp/ragpipe-wheel-smoke/bin/python -c \
+            'import ragpipe; assert ragpipe.__version__ == "0.2.0"'

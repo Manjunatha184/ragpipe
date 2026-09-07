@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from time import perf_counter
 
@@ -11,7 +13,7 @@ from ragpipe.chunking.chunker import Chunker
 from ragpipe.embedding.base import EmbeddingProvider
 from ragpipe.ingest.source import DocumentSource
 from ragpipe.ingest.source_scanner import diff_source
-from ragpipe.models import SyncResult
+from ragpipe.models import Chunk, ScannedDocument, SyncResult
 from ragpipe.store.base import Store, SyncLockUnavailableError
 
 log = structlog.get_logger()
@@ -23,6 +25,13 @@ _URL_PASSWORD_PATTERN = re.compile(
 _DSN_PASSWORD_PATTERN = re.compile(
     r"(?i)(password\s*=\s*)\S+",
 )
+
+
+@dataclass
+class _PreparedDocument:
+    document: ScannedDocument
+    chunks: list[Chunk]
+    embeddings: list[list[float]] = field(default_factory=list)
 
 
 class SyncAlreadyRunningError(RuntimeError):
@@ -63,6 +72,9 @@ class SyncPipeline:
         embedder: EmbeddingProvider,
         batch_size: int = 64,
     ) -> None:
+        if batch_size <= 0:
+            raise ValueError("Batch size must be greater than zero")
+
         self.store = store
         self.chunker = chunker
         self.embedder = embedder
@@ -116,46 +128,91 @@ class SyncPipeline:
                         for deleted in diff.deleted:
                             deleted_chunks += self.store.delete_document(deleted.id)
 
-                        for item in (*diff.new, *diff.changed):
-                            prior = previous.get(item.path)
+                        pending_documents: deque[_PreparedDocument] = deque()
+                        pending_chunks: list[tuple[_PreparedDocument, Chunk]] = []
 
-                            if prior:
-                                deleted_chunks += self.store.delete_document(prior.id)
+                        def flush_embedding_batch() -> None:
+                            nonlocal embedding_batches
+                            nonlocal embedding_duration_ms
 
-                            chunks = self.chunker.chunk(source.load(item))
-                            embeddings: list[list[float]] = []
+                            if not pending_chunks:
+                                return
 
-                            for batch_start in range(
-                                0,
-                                len(chunks),
-                                self.batch_size,
+                            batch_texts = [chunk.text for _, chunk in pending_chunks]
+                            embedding_started = perf_counter()
+                            embedding_batches += 1
+
+                            try:
+                                batch_embeddings = self.embedder.embed(batch_texts)
+                            finally:
+                                embedding_duration_ms += (perf_counter() - embedding_started) * 1000
+
+                            if len(batch_embeddings) != len(pending_chunks):
+                                raise RuntimeError(
+                                    "Embedding provider returned an unexpected number of vectors"
+                                )
+
+                            for (prepared, _), embedding in zip(
+                                pending_chunks,
+                                batch_embeddings,
+                                strict=True,
                             ):
-                                batch = chunks[batch_start : batch_start + self.batch_size]
-                                batch_texts = [chunk.text for chunk in batch]
-                                embedding_started = perf_counter()
-                                embedding_batches += 1
+                                prepared.embeddings.append(embedding)
 
-                                try:
-                                    batch_embeddings = self.embedder.embed(batch_texts)
-                                finally:
-                                    embedding_duration_ms += (
-                                        perf_counter() - embedding_started
-                                    ) * 1000
+                            pending_chunks.clear()
 
-                                embeddings.extend(batch_embeddings)
+                        def store_completed_documents() -> None:
+                            nonlocal deleted_chunks
+                            nonlocal embedded_chunks
 
-                            self.store.replace_document(
-                                path=item.path,
-                                content_hash=item.content_hash,
-                                media_type=item.media_type,
-                                size_bytes=item.size_bytes,
-                                chunks=chunks,
-                                embeddings=embeddings,
-                                model_name=self.embedder.model_name,
-                                document_metadata=item.metadata,
-                                metadata_hash=item.metadata_hash,
+                            while pending_documents:
+                                prepared = pending_documents[0]
+
+                                if len(prepared.embeddings) != len(prepared.chunks):
+                                    break
+
+                                pending_documents.popleft()
+                                item = prepared.document
+                                prior = previous.get(item.path)
+
+                                if prior:
+                                    deleted_chunks += self.store.delete_document(prior.id)
+
+                                self.store.replace_document(
+                                    path=item.path,
+                                    content_hash=item.content_hash,
+                                    media_type=item.media_type,
+                                    size_bytes=item.size_bytes,
+                                    chunks=prepared.chunks,
+                                    embeddings=prepared.embeddings,
+                                    model_name=self.embedder.model_name,
+                                    document_metadata=item.metadata,
+                                    metadata_hash=item.metadata_hash,
+                                )
+                                embedded_chunks += len(prepared.chunks)
+
+                        for item in (*diff.new, *diff.changed):
+                            prepared = _PreparedDocument(
+                                document=item,
+                                chunks=self.chunker.chunk(source.load(item)),
                             )
-                            embedded_chunks += len(chunks)
+                            pending_documents.append(prepared)
+
+                            for chunk in prepared.chunks:
+                                pending_chunks.append((prepared, chunk))
+
+                                if len(pending_chunks) == self.batch_size:
+                                    flush_embedding_batch()
+                                    store_completed_documents()
+
+                            # Empty documents are complete without embeddings.
+                            store_completed_documents()
+
+                        flush_embedding_batch()
+                        store_completed_documents()
+
+                        if pending_documents:
+                            raise RuntimeError("Could not map all embeddings to their documents")
 
                         finished = datetime.now(UTC)
 
