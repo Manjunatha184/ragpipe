@@ -10,3 +10,7 @@ htmlcov/
 dist/
 *.egg-info/
 
+# Generated enterprise demonstration data
+enterprise_demo_docs/
+enterprise_demo_docs-queries.json
+enterprise_demo_docs.enterprise-demo-scenario.json

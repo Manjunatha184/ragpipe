@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -14,6 +16,13 @@ class Settings(BaseSettings):
     batch_size: int = Field(default=64, gt=0, le=2048)
     log_level: str = "INFO"
     source: str | None = None
+    api_allowed_local_root: Path = Field(default_factory=Path.cwd)
+    api_cors_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+        ]
+    )
 
     @model_validator(mode="after")
     def validate_overlap(self) -> "Settings":

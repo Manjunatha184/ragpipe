@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from threading import Lock
 from typing import Any
 
 from ragpipe.embedding.base import EmbeddingProvider
@@ -13,6 +14,7 @@ class LocalSentenceTransformerProvider(EmbeddingProvider):
         self._model_name = model_name
         self._expected_dimension = expected_dimension
         self._model: Any | None = None
+        self._model_lock = Lock()
 
     def _load_model(self) -> Any:
         if self._model is None:
@@ -46,10 +48,14 @@ class LocalSentenceTransformerProvider(EmbeddingProvider):
         if not texts:
             return []
 
-        model = self._load_model()
-        values = model.encode(
-            list(texts),
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )
+        # SentenceTransformer model loading and inference share mutable state.
+        # Serialize access when the provider is reused by HTTP worker threads.
+        with self._model_lock:
+            model = self._load_model()
+            values = model.encode(
+                list(texts),
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+
         return [list(map(float, row)) for row in values]

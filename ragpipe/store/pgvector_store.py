@@ -4,6 +4,7 @@ import json
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from pgvector.psycopg import register_vector
@@ -47,7 +48,7 @@ class SchemaNotReadyError(RuntimeError):
 class PgVectorStore(Store):
     def __init__(self, database_url: str) -> None:
         self._pool = ConnectionPool(database_url, min_size=1, max_size=5, open=True)
-        self._conn: Connection[Any] | None = None
+        self._conn = ContextVar[Connection[Any] | None]("ragpipe_active_connection", default=None)
 
     def initialize(self, dimension: int) -> None:
         """Verify that Alembic created a compatible database schema."""
@@ -162,22 +163,23 @@ class PgVectorStore(Store):
                     raise
 
     def _active(self) -> Connection[Any]:
-        if self._conn is None:
+        connection = self._conn.get()
+        if connection is None:
             raise RuntimeError("Database operation must run inside transaction()")
-        return self._conn
+        return connection
 
     @contextmanager
     def transaction(self) -> Iterator[Store]:
-        if self._conn is not None:
+        if self._conn.get() is not None:
             raise RuntimeError("Nested transactions are not supported")
         with self._pool.connection() as conn:
-            self._conn = conn
+            token = self._conn.set(conn)
             register_vector(conn)
             try:
                 with conn.transaction():
                     yield self
             finally:
-                self._conn = None
+                self._conn.reset(token)
 
     def document_states(self) -> dict[str, DocumentState]:
         with self._active().cursor() as cur:
